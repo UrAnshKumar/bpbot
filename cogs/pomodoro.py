@@ -172,141 +172,152 @@ def build_card(timer: PomodoroTimer, avatars: dict, guild) -> io.BytesIO:
     card = Image.new("RGBA", (CARD_W, CARD_H), (*BG_MAIN, 255))
     d    = ImageDraw.Draw(card)
 
-    # ── Fonts  (BIG & BOLD everywhere) ──────────────────────────────────
-    f_vc_name   = _font(62, bold=True)    # Voice channel name in header
-    f_subtitle  = _font(22)               # session subtitle
-    f_cycle     = _font(20)               # "Cycle #N" top right
-    f_timer     = _font(130, bold=True)   # big clock digits
-    f_phase     = _font(44, bold=True)    # FOCUS / BREAK / IDLE
-    f_section   = _font(20, bold=True)    # PARTICIPANTS label
-    f_pill      = _font(26, bold=True)    # time inside pill
-    f_name_pill = _font(22, bold=True)    # member name
-    f_footer    = _font(20)               # footer hint
+    # ── Fonts  (BIG & BOLD everywhere, NO emoji in any string) ───────────
+    f_vc_name   = _font(58, bold=True)   # VC name in header
+    f_subtitle  = _font(20)              # session subtitle / state badge
+    f_cycle     = _font(19)              # Cycle #N
+    f_timer     = _font(88, bold=True)   # big clock digits — sized to fit inside ring
+    f_phase     = _font(36, bold=True)   # FOCUS / BREAK / IDLE inside ring
+    f_section   = _font(18, bold=True)   # PARTICIPANTS label
+    f_pill      = _font(25, bold=True)   # time inside pill
+    f_name_pill = _font(21, bold=True)   # member name
+    f_cam       = _font(17)              # camera badge text
+    f_footer    = _font(18)              # footer hint
 
-    # ── Header strip ────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────
+    # HEADER STRIP
+    # ─────────────────────────────────────────────────────────────────────
     d.rectangle([0, 0, CARD_W, HEADER_H], fill=(*BG_HEADER, 255))
-    # Gold bottom border
     d.rectangle([0, HEADER_H - 3, CARD_W, HEADER_H], fill=(*GOLD, 255))
 
-    # VC Name — large, bold, gold, centred vertically in header
+    # VC name — large bold gold on the left
     vc_name = timer.voice_channel.name
     bb = d.textbbox((0, 0), vc_name, font=f_vc_name)
     name_h = bb[3] - bb[1]
     d.text((36, (HEADER_H - name_h) // 2 - 4), vc_name, font=f_vc_name, fill=GOLD)
 
-    # Session sub-label (if different from VC name)
+    # Session sub-label right of VC name (if different)
     if timer.name != vc_name:
-        sub = f"— {timer.name}"
-        bb2 = d.textbbox((0, 0), vc_name, font=f_vc_name)
-        d.text((40 + (bb2[2] - bb2[0]), (HEADER_H - name_h) // 2 + 4), sub,
-               font=f_subtitle, fill=(*GREY, 200))
+        sub = "-- " + timer.name
+        vc_w = bb[2] - bb[0]
+        d.text((44 + vc_w, (HEADER_H - name_h) // 2 + 8), sub, font=f_subtitle, fill=GREY)
 
-    # Phase badge (top right)
-    phase_badge = {"focus": "🎯  FOCUS", "break": "☕  BREAK", "idle": "💤  IDLE"}[timer.state]
-    badge_col   = RED_FOCUS if timer.state == "focus" else GREEN_BREAK if timer.state == "break" else GREY
-    bb3 = d.textbbox((0, 0), phase_badge, font=f_subtitle)
-    badge_w = bb3[2] - bb3[0]
-    d.text((CARD_W - badge_w - 36, 16), phase_badge, font=f_subtitle, fill=badge_col)
+    # Right side of header: state badge + cycle + optional camera pill
+    state_labels = {"focus": "FOCUS", "break": "BREAK", "idle":  "IDLE"}
+    badge_cols   = {"focus": RED_FOCUS, "break": GREEN_BREAK, "idle": GREY}
+    state_txt    = state_labels[timer.state]
+    badge_col    = badge_cols[timer.state]
 
-    # Cycle number below phase badge
-    cycle_txt = f"Cycle #{timer.current_cycle}"
-    bb4 = d.textbbox((0, 0), cycle_txt, font=f_cycle)
-    d.text((CARD_W - (bb4[2] - bb4[0]) - 36, 46), cycle_txt, font=f_cycle, fill=GREY)
+    bb_s = d.textbbox((0, 0), state_txt, font=f_subtitle)
+    s_w  = bb_s[2] - bb_s[0]
+    dot_margin = 12
+    total_badge_w = 14 + dot_margin + s_w
+    badge_x = CARD_W - total_badge_w - 32
+    d.ellipse([badge_x, 18, badge_x + 14, 32], fill=badge_col)
+    d.text((badge_x + 14 + dot_margin, 12), state_txt, font=f_subtitle, fill=badge_col)
 
-    # ── Glow halo behind timer circle ───────────────────────────────────
+    cycle_txt = "Cycle #" + str(timer.current_cycle)
+    bb_c = d.textbbox((0, 0), cycle_txt, font=f_cycle)
+    d.text((CARD_W - (bb_c[2] - bb_c[0]) - 32, 42), cycle_txt, font=f_cycle, fill=GREY)
+
+    # Camera-required pill in header (plain text, no emoji)
+    if timer.video_required:
+        cam_label = "CAM ON"
+        bb_cam = d.textbbox((0, 0), cam_label, font=f_cam)
+        cw = (bb_cam[2] - bb_cam[0]) + 20
+        ch = 22
+        cx0 = CARD_W - cw - 32
+        cy0 = 66
+        d.rounded_rectangle([cx0, cy0, cx0 + cw, cy0 + ch],
+                             radius=ch // 2, fill=(*RED_FOCUS, 180))
+        d.text((cx0 + 10, cy0 + 2), cam_label, font=f_cam, fill=WHITE)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # GLOW + TIMER CIRCLE (right panel)
+    # ─────────────────────────────────────────────────────────────────────
     glow = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    for delta, alpha in [(240, 8), (210, 16), (185, 28)]:
+    gd   = ImageDraw.Draw(glow)
+    for delta, alpha in [(250, 6), (215, 14), (192, 24)]:
         gd.ellipse([RING_CX - delta, RING_CY - delta,
                     RING_CX + delta, RING_CY + delta],
                    fill=(*BG_CIRCLE, alpha))
     card = Image.alpha_composite(card, glow)
-    d = ImageDraw.Draw(card)
+    d    = ImageDraw.Draw(card)
 
-    # ── Big dark circle ──────────────────────────────────────────────────
-    d.ellipse([RING_CX - RING_R - 8, RING_CY - RING_R - 8,
-               RING_CX + RING_R + 8, RING_CY + RING_R + 8],
+    # Dark filled circle
+    d.ellipse([RING_CX - RING_R - 6, RING_CY - RING_R - 6,
+               RING_CX + RING_R + 6, RING_CY + RING_R + 6],
               fill=(*BG_CIRCLE, 255))
 
-    # ── Progress ring ────────────────────────────────────────────────────
-    total = (timer.focus_length if timer.state == "focus" else timer.break_length) * 60
-    total = total if timer.state != "idle" else 1
+    # Progress ring
+    TRACK_COL = (35, 42, 72)
+    ring_col  = RED_FOCUS if timer.state == "focus" else GREEN_BREAK if timer.state == "break" else GOLD
+    bbox_r    = [RING_CX - RING_R, RING_CY - RING_R, RING_CX + RING_R, RING_CY + RING_R]
+    d.arc(bbox_r, 0, 360, fill=TRACK_COL, width=RING_W)
+
+    total    = (timer.focus_length if timer.state == "focus" else timer.break_length) * 60
+    total    = total if timer.state != "idle" else 1
     elapsed  = max(0, total - timer.time_left) if timer.state != "idle" else 0
     fraction = min(1.0, elapsed / total) if total else 0
 
-    ring_col = RED_FOCUS if timer.state == "focus" else GREEN_BREAK if timer.state == "break" else GOLD_DIM
-    bbox_r   = [RING_CX - RING_R, RING_CY - RING_R, RING_CX + RING_R, RING_CY + RING_R]
-    d.arc(bbox_r, 0, 360, fill=GOLD_DIM, width=RING_W)
     if fraction > 0:
         d.arc(bbox_r, -90, -90 + 360 * fraction, fill=ring_col, width=RING_W)
 
-    # Gold dot at arc tip
+    # Gold dot follows the arc tip
     dot_a = math.radians(-90 + 360 * fraction)
-    dot_x  = int(RING_CX + RING_R * math.cos(dot_a))
-    dot_y  = int(RING_CY + RING_R * math.sin(dot_a))
-    d.ellipse([dot_x - 12, dot_y - 12, dot_x + 12, dot_y + 12], fill=GOLD)
+    dot_x = int(RING_CX + RING_R * math.cos(dot_a))
+    dot_y = int(RING_CY + RING_R * math.sin(dot_a))
+    d.ellipse([dot_x - 11, dot_y - 11, dot_x + 11, dot_y + 11], fill=GOLD)
 
-    # ── Timer digits  (big gold, centred in circle) ──────────────────────
+    # ── Timer digits + phase label, jointly centred inside the circle ─────
     mins, secs = timer.time_left // 60, timer.time_left % 60
     time_str   = f"{mins:02d}:{secs:02d}"
 
     bb_t  = d.textbbox((0, 0), time_str, font=f_timer)
-    t_w   = bb_t[2] - bb_t[0]
-    t_h   = bb_t[3] - bb_t[1]
-    d.text((RING_CX - t_w // 2, RING_CY - t_h // 2 - 26), time_str, font=f_timer, fill=GOLD)
+    t_w, t_h = bb_t[2] - bb_t[0], bb_t[3] - bb_t[1]
 
-    # Phase label below digits
-    ph_map = {"focus": "FOCUS", "break": "BREAK", "idle": "IDLE"}
-    ph_icon = {"focus": "🎯", "break": "☕", "idle": "💤"}
-    phase_full = f"{ph_icon[timer.state]}  {ph_map[timer.state]}"
-    _cx(d, phase_full, f_phase, RING_CX, RING_CY + t_h // 2 - 10, WHITE)
+    phase_str = state_labels[timer.state]
+    bb_ph = d.textbbox((0, 0), phase_str, font=f_phase)
+    p_w, p_h = bb_ph[2] - bb_ph[0], bb_ph[3] - bb_ph[1]
 
-    # ── Video badge (if video required) ─────────────────────────────────
-    if timer.video_required:
-        cam_txt = "📷  Camera Required"
-        bb_cam  = d.textbbox((0, 0), cam_txt, font=f_cycle)
-        cam_w   = bb_cam[2] - bb_cam[0]
-        d.rounded_rectangle(
-            [RING_CX - cam_w // 2 - 12, RING_CY + t_h // 2 + 26,
-             RING_CX + cam_w // 2 + 12, RING_CY + t_h // 2 + 56],
-            radius=14, fill=(*RED_FOCUS, 60)
-        )
-        _cx(d, cam_txt, f_cycle, RING_CX, RING_CY + t_h // 2 + 28, (*RED_FOCUS, 255))
+    GAP       = 14
+    block_h   = t_h + GAP + p_h
+    block_top = RING_CY - block_h // 2
 
-    # ── Vertical divider ────────────────────────────────────────────────
+    d.text((RING_CX - t_w // 2, block_top), time_str, font=f_timer, fill=GOLD)
+    d.text((RING_CX - p_w // 2, block_top + t_h + GAP), phase_str, font=f_phase, fill=badge_col)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # VERTICAL DIVIDER
+    # ─────────────────────────────────────────────────────────────────────
     DIV_X = 540
     d.rectangle([DIV_X, HEADER_H + 20, DIV_X + 2, CARD_H - 44], fill=(*SEPARATOR, 255))
 
-    # ── Left panel — PARTICIPANTS ────────────────────────────────────────
-    PX   = 36
-    PY   = HEADER_H + 26
+    # ─────────────────────────────────────────────────────────────────────
+    # LEFT PANEL — PARTICIPANTS
+    # ─────────────────────────────────────────────────────────────────────
+    PX = 36
+    PY = HEADER_H + 24
 
     d.text((PX, PY), "PARTICIPANTS", font=f_section, fill=GOLD)
-    PY += 36
+    PY += 34
 
     participants = timer.sorted_participants()[:MAX_MEMBERS]
 
     if not participants:
-        d.text((PX, PY + 10), "No one studying yet…", font=f_name_pill, fill=GREY)
+        d.text((PX, PY + 12), "No one studying yet...", font=f_name_pill, fill=GREY)
     else:
-        ROW_H = (CARD_H - PY - 60) // max(len(participants), 1)
-        ROW_H = min(ROW_H, 82)   # cap row height so it doesn't blow up with 1 member
+        available_h = CARD_H - PY - 50
+        ROW_H = min(available_h // max(len(participants), 1), 80)
 
         for i, (uid, secs_val) in enumerate(participants):
             row_y = PY + i * ROW_H
 
-            # Avatar circle
             av = avatars.get(uid)
             if av:
                 circ = _circle_crop(av, AVATAR_SZ)
                 card.paste(circ, (PX, row_y), circ)
             else:
-                d.ellipse([PX, row_y, PX + AVATAR_SZ, row_y + AVATAR_SZ], fill=(*BG_PILL, 255))
-                member_o = guild.get_member(uid) if guild else None
-                init = member_o.display_name[0].upper() if member_o else "?"
-                _cx(d, init, _font(28, bold=True),
-                    PX + AVATAR_SZ // 2, row_y + AVATAR_SZ // 2 - 18, GOLD)
-
             # Duration pill  (avatar right edge + gap)
             dur   = _fmt(secs_val)
             bb_p  = d.textbbox((0, 0), dur, font=f_pill)
