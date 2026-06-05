@@ -1,79 +1,52 @@
 import os
-import asyncio
 import logging
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import database
 
+# Configure basic logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("main")
+
 # Load environment variables
 load_dotenv()
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-PREFIX = os.getenv("DEFAULT_PREFIX", "!")
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("StudyBot")
+# Initialize database
+database.init_db()
 
-class StudyBot(commands.Bot):
+class WelcomeBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        intents.members = True
-        intents.voice_states = True
-        
-        super().__init__(command_prefix=PREFIX, intents=intents)
-        
+        # We request all intents as welcomer depends on on_member_join which is part of the members intent.
+        intents = discord.Intents.all()
+        super().__init__(command_prefix="!", intents=intents)
+
     async def setup_hook(self):
-        # Initialize Database
-        database.init_db()
-        logger.info("Database initialized.")
-        
-        # Load Cogs
-        cog_folder = "./cogs"
-        if not os.path.exists(cog_folder):
-            os.makedirs(cog_folder)
-            
-        cogs_loaded = []
-        for filename in os.listdir(cog_folder):
-            if filename.endswith(".py") and not filename.startswith("__"):
-                cog_name = f"cogs.{filename[:-3]}"
-                try:
-                    await self.load_extension(cog_name)
-                    cogs_loaded.append(cog_name)
-                except Exception as e:
-                    logger.error(f"Failed to load extension {cog_name}: {e}")
-                    
-        logger.info(f"Loaded cogs: {', '.join(cogs_loaded) if cogs_loaded else 'None'}")
-        
-        # Synchronize slash commands
-        logger.info("Synchronizing slash commands...")
-        try:
-            synced = await self.tree.sync()
-            logger.info(f"Successfully synced {len(synced)} slash commands.")
-        except Exception as e:
-            logger.error(f"Failed to sync slash commands: {e}")
+        # Load cogs
+        logger.info("Loading Welcomer Cog...")
+        await self.load_extension("cogs.welcomer")
 
     async def on_ready(self):
-        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        logger.info("Bot is ready and active!")
-        activity = discord.Activity(type=discord.ActivityType.watching, name="you study | /profile")
-        await self.change_presence(activity=activity)
+        logger.info(f"Bot logged in as {self.user.name}#{self.user.discriminator} (ID: {self.user.id})")
+        logger.info("Syncing slash commands globally...")
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Successfully synced {len(synced)} slash command(s) globally.")
+        except Exception as e:
+            logger.error(f"Error syncing slash commands: {e}")
 
-async def main():
-    if not TOKEN:
-        logger.error("No DISCORD_TOKEN found in environmental variables. Please configure your .env file.")
+def main():
+    if not TOKEN or TOKEN == "your_bot_token_here":
+        logger.error("Error: DISCORD_TOKEN is not configured in .env file.")
+        print("Please enter a valid DISCORD_TOKEN inside the .env file before starting the bot.")
         return
-        
-    bot = StudyBot()
-    
-    # Overwrite the default close behavior to ensure clean exit
-    async with bot:
-        await bot.start(TOKEN)
+
+    bot = WelcomeBot()
+    bot.run(TOKEN)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down bot...")
+    main()
