@@ -180,7 +180,7 @@ def build_card(timer: PomodoroTimer, avatars: dict, guild) -> io.BytesIO:
     f_phase     = _font(36, bold=True)   # FOCUS / BREAK / IDLE inside ring
     f_section   = _font(18, bold=True)   # PARTICIPANTS label
     f_pill      = _font(25, bold=True)   # time inside pill
-    f_name_pill = _font(21, bold=True)   # member name
+    f_name_pill = _font(25, bold=True)   # member name
     f_cam       = _font(17)              # camera badge text
     f_footer    = _font(18)              # footer hint
 
@@ -318,13 +318,21 @@ def build_card(timer: PomodoroTimer, avatars: dict, guild) -> io.BytesIO:
                 circ = _circle_crop(av, AVATAR_SZ)
                 card.paste(circ, (PX, row_y), circ)
             else:
-            # Duration pill  (avatar right edge + gap)
-            dur   = _fmt(secs_val)
-            bb_p  = d.textbbox((0, 0), dur, font=f_pill)
+                d.ellipse([PX, row_y, PX + AVATAR_SZ, row_y + AVATAR_SZ],
+                          fill=(*BG_PILL, 255))
+                m_init = guild.get_member(uid) if guild else None
+                init   = m_init.display_name[0].upper() if m_init else "?"
+                _cx(d, init, _font(26, bold=True),
+                    PX + AVATAR_SZ // 2, row_y + AVATAR_SZ // 2 - 16, GOLD)
+
+            # Duration pill
+            dur    = _fmt(secs_val)
+            bb_p   = d.textbbox((0, 0), dur, font=f_pill)
             pill_w = (bb_p[2] - bb_p[0]) + 32
             pill_h = AVATAR_SZ
             pill_x = PX + AVATAR_SZ + 14
             pill_y = row_y
+
 
             d.rounded_rectangle(
                 [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
