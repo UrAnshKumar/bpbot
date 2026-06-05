@@ -9,373 +9,358 @@ import logging
 
 logger = logging.getLogger("StudyBot")
 
-# ── Pillow soft-import ─────────────────────────────────────────────────────────
+# ── Pillow soft-import ──────────────────────────────────────────────────────
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont
     PILLOW_AVAILABLE = True
 except ImportError:
     PILLOW_AVAILABLE = False
-    logger.warning("Pillow not installed. Visual image cards will be disabled.")
+    logger.warning("Pillow not installed – visual cards disabled.")
 
-# ── Colour palette (matches the sample screenshot) ────────────────────────────
-BG_MAIN        = (8,   18,  38)   # deep navy background
-BG_HEADER      = (11,  24,  50)   # slightly lighter header strip
-BG_CIRCLE      = (18,  26,  52)   # dark circle behind timer
-BG_PILL        = (18,  28,  58)   # member pill background
-GOLD           = (212, 175,  55)  # main gold accent
-GOLD_DIM       = (140, 110,  30)  # dimmed gold for ring track
-WHITE          = (240, 242, 255)  # main text
-GREY           = (120, 130, 160)  # subtle text / footer
-RED_FOCUS      = (220,  75,  75)  # focus ring colour
-GREEN_BREAK    = ( 72, 200, 120)  # break ring colour
-IDLE_RING      = ( 50,  60,  90)  # idle ring colour
-SEPARATOR      = ( 25,  35,  65)  # thin divider lines
+# ── Colour palette ──────────────────────────────────────────────────────────
+BG_MAIN       = (8,   18,  38)
+BG_HEADER     = (11,  24,  50)
+BG_CIRCLE     = (14,  22,  48)
+BG_PILL       = (18,  28,  60)
+GOLD          = (212, 175,  55)
+GOLD_DIM      = (80,  65,  20)
+WHITE         = (245, 248, 255)
+GREY          = (120, 130, 160)
+RED_FOCUS     = (220,  70,  70)
+GREEN_BREAK   = ( 72, 200, 120)
+SEPARATOR     = ( 22,  34,  68)
 
-# ── Card dimensions ────────────────────────────────────────────────────────────
-CARD_W = 1080
-CARD_H = 600
-CORNER = 40          # rounded corner radius
-HEADER_H = 96        # header strip height
-RING_R   = 185       # outer radius of the timer circle
-RING_CX  = 800       # timer circle centre-x
-RING_CY  = 340       # timer circle centre-y
-RING_TRACK_W = 12    # ring stroke width
+# ── Card dimensions ──────────────────────────────────────────────────────────
+CARD_W    = 1120
+CARD_H    = 620
+CORNER    = 44
+HEADER_H  = 104
+RING_R    = 190
+RING_CX   = 830
+RING_CY   = 370
+RING_W    = 18
+AVATAR_SZ = 62
+MAX_MEMBERS = 6
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
 #  PomodoroTimer  (data model)
-# ──────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
 class PomodoroTimer:
-    def __init__(self, guild_id, voice_channel, text_channel,
-                 focus_length, break_length, name="Focus Session"):
-        self.guild_id       = guild_id
-        self.voice_channel  = voice_channel
-        self.text_channel   = text_channel
-        self.focus_length   = focus_length   # minutes
-        self.break_length   = break_length   # minutes
-        self.name           = name
+    def __init__(
+        self,
+        guild_id,
+        voice_channel,
+        notification_channel,    # text channel where the card lives
+        focus_length: int,
+        break_length: int,
+        name: str | None = None,
+        video_required: bool = False,
+        inactive_threshold: int = 5,   # minutes before warn/kick action
+    ):
+        self.guild_id             = guild_id
+        self.voice_channel        = voice_channel
+        self.notification_channel = notification_channel
+        self.focus_length         = focus_length
+        self.break_length         = break_length
+        self.name                 = name or voice_channel.name
+        self.video_required       = video_required
+        self.inactive_threshold   = inactive_threshold  # minutes
 
         self.state          = "idle"   # idle | focus | break
         self.time_left      = 0        # seconds
         self.current_cycle  = 1
         self.task           = None
         self.status_message = None
+        self.voice_alerts   = True
+        self.original_name  = voice_channel.name
 
-        # Presence / AFK tracking
-        self.present_members       = set()
-        self.missed_cycles         = {}
-        self.inactivity_threshold  = 3
-        self.voice_alerts          = True
-        self.original_channel_name = voice_channel.name
+        # Present check (cycle-based)
+        self.present_members = set()
+        self.last_present: dict[int, float] = {}   # uid → monotonic time of last present
 
         # Study-duration tracking
         self.session_seconds: dict[int, float] = {}
-        self._voice_join_time: dict[int, float] = {}
+        self._join_time: dict[int, float] = {}
 
-    def snapshot_voice_members(self):
+        # Camera / video tracking  (only used when video_required=True)
+        self.cam_off_since: dict[int, float] = {}   # uid → monotonic when cam turned off
+        self.cam_warned: set[int] = set()            # uids already DM-warned
+
+    # ── Duration tracking ────────────────────────────────────────────────
+    def snapshot(self):
         now = time.monotonic()
-        for member in self.voice_channel.members:
-            if not member.bot:
-                self._voice_join_time[member.id] = now
+        for m in self.voice_channel.members:
+            if not m.bot:
+                self._join_time[m.id] = now
 
-    def record_join(self, user_id: int):
-        self._voice_join_time[user_id] = time.monotonic()
+    def record_join(self, uid: int):
+        self._join_time[uid] = time.monotonic()
 
-    def record_leave(self, user_id: int):
-        joined = self._voice_join_time.pop(user_id, None)
-        if joined is not None:
-            self.session_seconds[user_id] = (
-                self.session_seconds.get(user_id, 0) + (time.monotonic() - joined)
-            )
+    def record_leave(self, uid: int):
+        t = self._join_time.pop(uid, None)
+        if t:
+            self.session_seconds[uid] = self.session_seconds.get(uid, 0) + (time.monotonic() - t)
 
-    def flush_current_members(self):
+    def flush(self):
         now = time.monotonic()
-        for uid, join_t in list(self._voice_join_time.items()):
-            self.session_seconds[uid] = self.session_seconds.get(uid, 0) + (now - join_t)
-            self._voice_join_time[uid] = now
+        for uid, t in list(self._join_time.items()):
+            self.session_seconds[uid] = self.session_seconds.get(uid, 0) + (now - t)
+            self._join_time[uid] = now
 
-    def sorted_participants(self) -> list[tuple[int, float]]:
-        self.flush_current_members()
+    def sorted_participants(self):
+        self.flush()
         return sorted(self.session_seconds.items(), key=lambda x: x[1], reverse=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Image-card generation helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _fmt_dur(seconds: float) -> str:
+# ════════════════════════════════════════════════════════════════════════════
+#  Card image generation
+# ════════════════════════════════════════════════════════════════════════════
+def _fmt(seconds: float) -> str:
     h = int(seconds) // 3600
     m = (int(seconds) % 3600) // 60
     s = int(seconds) % 60
-    if h:
-        return f"{h}h {m:02d}m"
-    return f"{m:02d}:{s:02d}"
+    return f"{h}h {m:02d}m" if h else f"{m:02d}:{s:02d}"
 
 
-def _circle_crop(img: "Image.Image", size: int) -> "Image.Image":
+def _circle_crop(img, size):
     img = img.convert("RGBA").resize((size, size), Image.LANCZOS)
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
-    result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    result.paste(img, mask=mask)
-    return result
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    out.paste(img, mask=mask)
+    return out
 
 
-def _try_font(size: int, bold: bool = False) -> "ImageFont.ImageFont":
-    candidates_bold = [
+def _font(size, bold=False):
+    paths_bold = [
         "c:/Windows/Fonts/segoeuib.ttf",
         "c:/Windows/Fonts/arialbd.ttf",
         "c:/Windows/Fonts/calibrib.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
-    candidates_reg = [
+    paths_reg = [
         "c:/Windows/Fonts/segoeui.ttf",
         "c:/Windows/Fonts/arial.ttf",
         "c:/Windows/Fonts/calibri.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
-    for path in (candidates_bold if bold else candidates_reg):
+    for p in (paths_bold if bold else paths_reg):
         try:
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(p, size)
         except Exception:
             pass
     return ImageFont.load_default()
 
 
-def _rounded_card_mask(size: tuple[int, int], radius: int) -> "Image.Image":
-    """Return an L-mode mask with rounded corners for the card."""
-    mask = Image.new("L", size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle([0, 0, size[0] - 1, size[1] - 1], radius=radius, fill=255)
-    return mask
-
-
-def _draw_arc_ring(draw: "ImageDraw.ImageDraw", cx: int, cy: int, r: int,
-                   fraction: float, state: str, track_w: int):
-    """Draw a circular progress ring (track + coloured arc)."""
-    bbox = [cx - r, cy - r, cx + r, cy + r]
-    # Track ring
-    draw.arc(bbox, 0, 360, fill=GOLD_DIM, width=track_w)
-    if fraction <= 0:
-        return
-    colour = RED_FOCUS if state == "focus" else GREEN_BREAK if state == "break" else IDLE_RING
-    draw.arc(bbox, -90, -90 + 360 * fraction, fill=colour, width=track_w)
-
-
-def _draw_bar_icon(draw: "ImageDraw.ImageDraw", x: int, y: int):
-    """Draw the ≡≡≡ stacked-bars icon in gold (3 columns × 4 bars each)."""
-    bar_w, bar_h, bar_gap = 18, 4, 6
-    col_gap = 10
-    for col in range(3):
-        cx = x + col * (bar_w + col_gap)
-        for row in range(4):
-            by = y + row * (bar_h + bar_gap)
-            draw.rounded_rectangle(
-                [cx, by, cx + bar_w, by + bar_h],
-                radius=2, fill=GOLD
-            )
-
-
-def _text_centre(draw, text, font, cx, y, colour):
+def _cx(draw, text, font, cx, y, fill):
     """Draw text horizontally centred on cx."""
     bb = draw.textbbox((0, 0), text, font=font)
-    w = bb[2] - bb[0]
-    draw.text((cx - w // 2, y), text, font=font, fill=colour)
+    draw.text((cx - (bb[2] - bb[0]) // 2, y), text, font=font, fill=fill)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Main card builder
-# ──────────────────────────────────────────────────────────────────────────────
-def build_status_image(
-    timer: "PomodoroTimer",
-    avatar_images: dict[int, "Image.Image"],
-    guild: discord.Guild,
-) -> io.BytesIO:
-    """
-    Build a 1080×600 premium dark-navy Pomodoro card (matches the sample).
-    Returns a PNG BytesIO ready for discord.File.
-    """
+def _round_mask(w, h, r):
+    m = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(m).rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
+    return m
 
-    # ── Canvas ────────────────────────────────────────────────────────────
-    canvas = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    card   = Image.new("RGBA", (CARD_W, CARD_H), (*BG_MAIN, 255))
-    draw   = ImageDraw.Draw(card)
 
-    # ── Fonts ─────────────────────────────────────────────────────────────
-    font_name   = _try_font(54, bold=True)   # session name in header
-    font_cycle  = _try_font(18)              # "Cycle #N" sub-label
-    font_time   = _try_font(92, bold=True)   # big timer digits
-    font_phase  = _try_font(26)              # FOCUS / BREAK / IDLE
-    font_member = _try_font(22, bold=True)   # member name
-    font_pill   = _try_font(18)             # time pill text
-    font_footer = _try_font(18)              # footer hint
+def build_card(timer: PomodoroTimer, avatars: dict, guild) -> io.BytesIO:
+    """Render the 1120×620 premium Pomodoro card."""
 
-    # ── Header strip ──────────────────────────────────────────────────────
-    draw.rectangle([0, 0, CARD_W, HEADER_H], fill=(*BG_HEADER, 255))
-    # Bottom edge of header — thin gold line
-    draw.rectangle([0, HEADER_H - 2, CARD_W, HEADER_H], fill=(*GOLD, 255))
+    # ── Base canvas ─────────────────────────────────────────────────────
+    card = Image.new("RGBA", (CARD_W, CARD_H), (*BG_MAIN, 255))
+    d    = ImageDraw.Draw(card)
 
-    # Bar icons
-    ICON_X, ICON_Y = 28, 22
-    _draw_bar_icon(draw, ICON_X, ICON_Y)
+    # ── Fonts  (BIG & BOLD everywhere) ──────────────────────────────────
+    f_vc_name   = _font(62, bold=True)    # Voice channel name in header
+    f_subtitle  = _font(22)               # session subtitle
+    f_cycle     = _font(20)               # "Cycle #N" top right
+    f_timer     = _font(130, bold=True)   # big clock digits
+    f_phase     = _font(44, bold=True)    # FOCUS / BREAK / IDLE
+    f_section   = _font(20, bold=True)    # PARTICIPANTS label
+    f_pill      = _font(26, bold=True)    # time inside pill
+    f_name_pill = _font(22, bold=True)    # member name
+    f_footer    = _font(20)               # footer hint
 
-    # Session name (right of the bars)
-    name_text = timer.name if len(timer.name) <= 24 else timer.name[:22] + "…"
-    ICON_END_X = ICON_X + 3 * (18 + 10)   # approx right edge of bars (3 cols)
-    draw.text((ICON_END_X + 18, 16), name_text, font=font_name, fill=GOLD)
+    # ── Header strip ────────────────────────────────────────────────────
+    d.rectangle([0, 0, CARD_W, HEADER_H], fill=(*BG_HEADER, 255))
+    # Gold bottom border
+    d.rectangle([0, HEADER_H - 3, CARD_W, HEADER_H], fill=(*GOLD, 255))
 
-    # Cycle sub-label in header (far right)
-    cycle_text = f"Cycle #{timer.current_cycle}"
-    bb_c = draw.textbbox((0, 0), cycle_text, font=font_cycle)
-    draw.text((CARD_W - (bb_c[2] - bb_c[0]) - 28, 38), cycle_text, font=font_cycle, fill=GREY)
+    # VC Name — large, bold, gold, centred vertically in header
+    vc_name = timer.voice_channel.name
+    bb = d.textbbox((0, 0), vc_name, font=f_vc_name)
+    name_h = bb[3] - bb[1]
+    d.text((36, (HEADER_H - name_h) // 2 - 4), vc_name, font=f_vc_name, fill=GOLD)
 
-    # ── Background subtle radial glow behind circle (cosmetic) ────────────
-    # Draw several concentric low-opacity circles expanding outward
-    glow_layer = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow_layer)
-    for radius_delta, alpha in [(220, 12), (200, 20), (180, 30)]:
-        r = RING_R + radius_delta
-        gd.ellipse(
-            [RING_CX - r, RING_CY - r, RING_CX + r, RING_CY + r],
-            fill=(*BG_CIRCLE, alpha)
+    # Session sub-label (if different from VC name)
+    if timer.name != vc_name:
+        sub = f"— {timer.name}"
+        bb2 = d.textbbox((0, 0), vc_name, font=f_vc_name)
+        d.text((40 + (bb2[2] - bb2[0]), (HEADER_H - name_h) // 2 + 4), sub,
+               font=f_subtitle, fill=(*GREY, 200))
+
+    # Phase badge (top right)
+    phase_badge = {"focus": "🎯  FOCUS", "break": "☕  BREAK", "idle": "💤  IDLE"}[timer.state]
+    badge_col   = RED_FOCUS if timer.state == "focus" else GREEN_BREAK if timer.state == "break" else GREY
+    bb3 = d.textbbox((0, 0), phase_badge, font=f_subtitle)
+    badge_w = bb3[2] - bb3[0]
+    d.text((CARD_W - badge_w - 36, 16), phase_badge, font=f_subtitle, fill=badge_col)
+
+    # Cycle number below phase badge
+    cycle_txt = f"Cycle #{timer.current_cycle}"
+    bb4 = d.textbbox((0, 0), cycle_txt, font=f_cycle)
+    d.text((CARD_W - (bb4[2] - bb4[0]) - 36, 46), cycle_txt, font=f_cycle, fill=GREY)
+
+    # ── Glow halo behind timer circle ───────────────────────────────────
+    glow = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for delta, alpha in [(240, 8), (210, 16), (185, 28)]:
+        gd.ellipse([RING_CX - delta, RING_CY - delta,
+                    RING_CX + delta, RING_CY + delta],
+                   fill=(*BG_CIRCLE, alpha))
+    card = Image.alpha_composite(card, glow)
+    d = ImageDraw.Draw(card)
+
+    # ── Big dark circle ──────────────────────────────────────────────────
+    d.ellipse([RING_CX - RING_R - 8, RING_CY - RING_R - 8,
+               RING_CX + RING_R + 8, RING_CY + RING_R + 8],
+              fill=(*BG_CIRCLE, 255))
+
+    # ── Progress ring ────────────────────────────────────────────────────
+    total = (timer.focus_length if timer.state == "focus" else timer.break_length) * 60
+    total = total if timer.state != "idle" else 1
+    elapsed  = max(0, total - timer.time_left) if timer.state != "idle" else 0
+    fraction = min(1.0, elapsed / total) if total else 0
+
+    ring_col = RED_FOCUS if timer.state == "focus" else GREEN_BREAK if timer.state == "break" else GOLD_DIM
+    bbox_r   = [RING_CX - RING_R, RING_CY - RING_R, RING_CX + RING_R, RING_CY + RING_R]
+    d.arc(bbox_r, 0, 360, fill=GOLD_DIM, width=RING_W)
+    if fraction > 0:
+        d.arc(bbox_r, -90, -90 + 360 * fraction, fill=ring_col, width=RING_W)
+
+    # Gold dot at arc tip
+    dot_a = math.radians(-90 + 360 * fraction)
+    dot_x  = int(RING_CX + RING_R * math.cos(dot_a))
+    dot_y  = int(RING_CY + RING_R * math.sin(dot_a))
+    d.ellipse([dot_x - 12, dot_y - 12, dot_x + 12, dot_y + 12], fill=GOLD)
+
+    # ── Timer digits  (big gold, centred in circle) ──────────────────────
+    mins, secs = timer.time_left // 60, timer.time_left % 60
+    time_str   = f"{mins:02d}:{secs:02d}"
+
+    bb_t  = d.textbbox((0, 0), time_str, font=f_timer)
+    t_w   = bb_t[2] - bb_t[0]
+    t_h   = bb_t[3] - bb_t[1]
+    d.text((RING_CX - t_w // 2, RING_CY - t_h // 2 - 26), time_str, font=f_timer, fill=GOLD)
+
+    # Phase label below digits
+    ph_map = {"focus": "FOCUS", "break": "BREAK", "idle": "IDLE"}
+    ph_icon = {"focus": "🎯", "break": "☕", "idle": "💤"}
+    phase_full = f"{ph_icon[timer.state]}  {ph_map[timer.state]}"
+    _cx(d, phase_full, f_phase, RING_CX, RING_CY + t_h // 2 - 10, WHITE)
+
+    # ── Video badge (if video required) ─────────────────────────────────
+    if timer.video_required:
+        cam_txt = "📷  Camera Required"
+        bb_cam  = d.textbbox((0, 0), cam_txt, font=f_cycle)
+        cam_w   = bb_cam[2] - bb_cam[0]
+        d.rounded_rectangle(
+            [RING_CX - cam_w // 2 - 12, RING_CY + t_h // 2 + 26,
+             RING_CX + cam_w // 2 + 12, RING_CY + t_h // 2 + 56],
+            radius=14, fill=(*RED_FOCUS, 60)
         )
-    card = Image.alpha_composite(card, glow_layer)
-    draw = ImageDraw.Draw(card)
+        _cx(d, cam_txt, f_cycle, RING_CX, RING_CY + t_h // 2 + 28, (*RED_FOCUS, 255))
 
-    # ── Big dark circle (timer background) ────────────────────────────────
-    CIRCLE_R = RING_R + 6
-    draw.ellipse(
-        [RING_CX - CIRCLE_R, RING_CY - CIRCLE_R,
-         RING_CX + CIRCLE_R, RING_CY + CIRCLE_R],
-        fill=(*BG_CIRCLE, 255)
-    )
+    # ── Vertical divider ────────────────────────────────────────────────
+    DIV_X = 540
+    d.rectangle([DIV_X, HEADER_H + 20, DIV_X + 2, CARD_H - 44], fill=(*SEPARATOR, 255))
 
-    # ── Progress ring ─────────────────────────────────────────────────────
-    total_phase = (
-        timer.focus_length * 60 if timer.state == "focus" else
-        timer.break_length * 60 if timer.state == "break" else
-        1
-    )
-    elapsed = max(0, total_phase - timer.time_left) if timer.state != "idle" else 0
-    fraction = min(1.0, elapsed / total_phase) if total_phase else 0
-    _draw_arc_ring(draw, RING_CX, RING_CY, RING_R, fraction, timer.state, RING_TRACK_W)
+    # ── Left panel — PARTICIPANTS ────────────────────────────────────────
+    PX   = 36
+    PY   = HEADER_H + 26
 
-    # ── Gold dot indicator at 12 o'clock ──────────────────────────────────
-    dot_r = 10
-    dot_angle = math.radians(-90 + 360 * fraction)   # follows the arc tip
-    dot_x = int(RING_CX + RING_R * math.cos(dot_angle))
-    dot_y = int(RING_CY + RING_R * math.sin(dot_angle))
-    draw.ellipse(
-        [dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r],
-        fill=GOLD
-    )
-
-    # ── Timer digits ──────────────────────────────────────────────────────
-    mins = timer.time_left // 60
-    secs = timer.time_left % 60
-    time_str = f"{mins:02d}:{secs:02d}"
-
-    bb_t = draw.textbbox((0, 0), time_str, font=font_time)
-    tw, th = bb_t[2] - bb_t[0], bb_t[3] - bb_t[1]
-    draw.text((RING_CX - tw // 2, RING_CY - th // 2 - 18), time_str, font=font_time, fill=GOLD)
-
-    # ── Phase label below digits ──────────────────────────────────────────
-    phase_icon = {"focus": "🎯", "break": "☕", "idle": "💤"}[timer.state]
-    phase_text = {"focus": "FOCUS", "break": "BREAK", "idle": "IDLE"}[timer.state]
-    phase_full = f"{phase_icon}  {phase_text}"
-    _text_centre(draw, phase_full, font_phase, RING_CX, RING_CY + th // 2 + 8, WHITE)
-
-    # ── Left panel: member list ────────────────────────────────────────────
-    LEFT_X      = 36
-    LEFT_Y_TOP  = HEADER_H + 30
-    AVATAR_SZ   = 48
-    PILL_PAD_X  = 10
-    PILL_PAD_Y  = 6
-    ROW_GAP     = 70
-    MAX_MEMBERS = 6
+    d.text((PX, PY), "PARTICIPANTS", font=f_section, fill=GOLD)
+    PY += 36
 
     participants = timer.sorted_participants()[:MAX_MEMBERS]
 
-    # Section title
-    draw.text((LEFT_X, LEFT_Y_TOP), "PARTICIPANTS", font=_try_font(14), fill=GOLD)
-    LEFT_Y = LEFT_Y_TOP + 28
-
     if not participants:
-        draw.text((LEFT_X, LEFT_Y + 12), "No one studying yet…", font=font_pill, fill=GREY)
+        d.text((PX, PY + 10), "No one studying yet…", font=f_name_pill, fill=GREY)
     else:
+        ROW_H = (CARD_H - PY - 60) // max(len(participants), 1)
+        ROW_H = min(ROW_H, 82)   # cap row height so it doesn't blow up with 1 member
+
         for i, (uid, secs_val) in enumerate(participants):
-            row_y = LEFT_Y + i * ROW_GAP
+            row_y = PY + i * ROW_H
 
             # Avatar circle
-            av_img = avatar_images.get(uid)
-            if av_img:
-                circ = _circle_crop(av_img, AVATAR_SZ)
-                card.paste(circ, (LEFT_X, row_y), circ)
+            av = avatars.get(uid)
+            if av:
+                circ = _circle_crop(av, AVATAR_SZ)
+                card.paste(circ, (PX, row_y), circ)
             else:
-                draw.ellipse(
-                    [LEFT_X, row_y, LEFT_X + AVATAR_SZ, row_y + AVATAR_SZ],
-                    fill=(*BG_PILL, 255)
-                )
-                # Initials placeholder
-                member_obj = guild.get_member(uid) if guild else None
-                init = (member_obj.display_name[0].upper() if member_obj else "?")
-                draw.text(
-                    (LEFT_X + AVATAR_SZ // 2 - 7, row_y + AVATAR_SZ // 2 - 11),
-                    init, font=_try_font(20, bold=True), fill=GOLD
-                )
+                d.ellipse([PX, row_y, PX + AVATAR_SZ, row_y + AVATAR_SZ], fill=(*BG_PILL, 255))
+                member_o = guild.get_member(uid) if guild else None
+                init = member_o.display_name[0].upper() if member_o else "?"
+                _cx(d, init, _font(28, bold=True),
+                    PX + AVATAR_SZ // 2, row_y + AVATAR_SZ // 2 - 18, GOLD)
 
-            # Duration pill (right of avatar)
-            dur_str = _fmt_dur(secs_val)
-            pill_font = _try_font(20, bold=True)
-            bb_p = draw.textbbox((0, 0), dur_str, font=pill_font)
-            pill_w = (bb_p[2] - bb_p[0]) + PILL_PAD_X * 2
+            # Duration pill  (avatar right edge + gap)
+            dur   = _fmt(secs_val)
+            bb_p  = d.textbbox((0, 0), dur, font=f_pill)
+            pill_w = (bb_p[2] - bb_p[0]) + 32
             pill_h = AVATAR_SZ
-            pill_x = LEFT_X + AVATAR_SZ + 10
+            pill_x = PX + AVATAR_SZ + 14
             pill_y = row_y
 
-            draw.rounded_rectangle(
+            d.rounded_rectangle(
                 [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
                 radius=pill_h // 2,
                 fill=(*BG_PILL, 255),
-                outline=(*GOLD, 60),
-                width=1
+                outline=(*GOLD, 80),
+                width=2
             )
-            # Text centred inside pill
-            draw.text(
-                (pill_x + PILL_PAD_X, pill_y + (pill_h - (bb_p[3] - bb_p[1])) // 2),
-                dur_str, font=pill_font, fill=GOLD
+            d.text(
+                (pill_x + 16, pill_y + (pill_h - (bb_p[3] - bb_p[1])) // 2),
+                dur, font=f_pill, fill=GOLD
             )
 
-    # ── Vertical divider between left panel and right circle ──────────────
-    DIV_X = 580
-    draw.rectangle([DIV_X, HEADER_H + 16, DIV_X + 1, CARD_H - 40], fill=(*SEPARATOR, 255))
+            # Member name to the right of the pill
+            m_obj = guild.get_member(uid) if guild else None
+            mname = m_obj.display_name if m_obj else f"User {uid}"
+            if len(mname) > 16:
+                mname = mname[:14] + "…"
+            d.text(
+                (pill_x + pill_w + 14, row_y + (AVATAR_SZ - 26) // 2),
+                mname, font=f_name_pill, fill=WHITE
+            )
 
-    # ── Footer ─────────────────────────────────────────────────────────────
-    FOOTER_Y = CARD_H - 36
-    footer_msg = "Press ✅ Present to confirm you're active  ·  Use /timers to see all sessions"
-    _text_centre(draw, footer_msg, font_footer, CARD_W // 2, FOOTER_Y, GREY)
+    # ── Footer ───────────────────────────────────────────────────────────
+    FOOT_Y = CARD_H - 36
+    foot = "✅ Press Present to confirm you're active  ·  Auto-refreshes every 30 s"
+    _cx(d, foot, f_footer, CARD_W // 2, FOOT_Y, GREY)
 
-    # ── Apply rounded-corner mask ──────────────────────────────────────────
-    mask = _rounded_card_mask((CARD_W, CARD_H), CORNER)
-    canvas.paste(card, (0, 0), mask)
+    # ── Rounded corners mask ─────────────────────────────────────────────
+    final = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
+    final.paste(card, mask=_round_mask(CARD_W, CARD_H, CORNER))
 
-    # ── Export as PNG ──────────────────────────────────────────────────────
-    final = canvas.convert("RGB")
     buf = io.BytesIO()
-    final.save(buf, format="PNG", optimize=True)
+    final.convert("RGB").save(buf, "PNG", optimize=True)
     buf.seek(0)
     return buf
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
 #  Cog
-# ──────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
 class PomodoroCog(commands.Cog):
     def __init__(self, bot):
         self.bot           = bot
-        self.active_timers: dict[int, PomodoroTimer] = {}
+        self.timers: dict[int, PomodoroTimer] = {}   # vc_id → timer
 
-    # ── Voice state tracking ─────────────────────────────────────────────
+    # ── Voice state listener ─────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -385,320 +370,409 @@ class PomodoroCog(commands.Cog):
     ):
         if member.bot:
             return
+
+        # Duration tracking — leave old channel
         if before.channel:
-            timer = self.active_timers.get(before.channel.id)
-            if timer and timer.state != "idle":
-                timer.record_leave(member.id)
+            t = self.timers.get(before.channel.id)
+            if t and t.state != "idle":
+                t.record_leave(member.id)
+
+        # Duration tracking — join new channel
         if after.channel:
-            timer = self.active_timers.get(after.channel.id)
-            if timer and timer.state != "idle":
-                timer.record_join(member.id)
+            t = self.timers.get(after.channel.id)
+            if t and t.state != "idle":
+                t.record_join(member.id)
+
+        # Camera tracking (video_required mode)
+        if after.channel:
+            t = self.timers.get(after.channel.id)
+            if t and t.video_required and t.state == "focus":
+                if not after.self_video:
+                    # Camera just turned off (or joined without camera)
+                    if member.id not in t.cam_off_since:
+                        t.cam_off_since[member.id] = time.monotonic()
+                else:
+                    # Camera on — clear any warning state
+                    t.cam_off_since.pop(member.id, None)
+                    t.cam_warned.discard(member.id)
 
     # ── Avatar fetching ──────────────────────────────────────────────────
-    async def _fetch_avatars(self, user_ids: list[int]) -> dict[int, "Image.Image"]:
+    async def _fetch_avatars(self, uids: list[int]) -> dict:
         if not PILLOW_AVAILABLE:
             return {}
-        result = {}
-        for uid in user_ids:
+        out = {}
+        for uid in uids:
             try:
                 user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                 if not user:
                     continue
                 url = str(user.display_avatar.replace(size=128, format="webp"))
-                async with self.bot.http._HTTPClient__session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        result[uid] = Image.open(io.BytesIO(data)).convert("RGBA")
+                async with self.bot.http._HTTPClient__session.get(url) as r:
+                    if r.status == 200:
+                        out[uid] = Image.open(io.BytesIO(await r.read())).convert("RGBA")
             except Exception as e:
-                logger.debug(f"Avatar fetch failed for {uid}: {e}")
-        return result
+                logger.debug(f"Avatar fetch {uid}: {e}")
+        return out
 
-    # ── Interactive buttons ────────────────────────────────────────────────
+    # ── Interactive buttons ───────────────────────────────────────────────
     class PomodoroView(discord.ui.View):
-        def __init__(self, timer: "PomodoroTimer", cog: "PomodoroCog"):
+        def __init__(self, timer, cog):
             super().__init__(timeout=None)
             self.timer = timer
             self.cog   = cog
 
-        @discord.ui.button(label="Start", style=discord.ButtonStyle.success, emoji="▶")
-        async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        @discord.ui.button(label="▶  Start", style=discord.ButtonStyle.success)
+        async def start(self, interaction: discord.Interaction, _):
             if self.timer.state != "idle":
-                await interaction.response.send_message("Timer is already running!", ephemeral=True)
-                return
+                return await interaction.response.send_message("Already running!", ephemeral=True)
             self.timer.state     = "focus"
             self.timer.time_left = self.timer.focus_length * 60
             self.timer.present_members.clear()
-            self.timer.snapshot_voice_members()
-            self.timer.task = asyncio.create_task(self.cog.run_timer(self.timer))
+            self.timer.snapshot()
+            self.timer.task = asyncio.create_task(self.cog._run(self.timer))
             await interaction.response.defer()
-            await self.cog.update_status_card(self.timer)
+            await self.cog._push_card(self.timer)
 
-        @discord.ui.button(label="Present", style=discord.ButtonStyle.primary, emoji="✅")
-        async def present_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        @discord.ui.button(label="✅  Present", style=discord.ButtonStyle.primary)
+        async def present(self, interaction: discord.Interaction, _):
             if interaction.user not in self.timer.voice_channel.members:
-                await interaction.response.send_message(
-                    "You must be in the Pomodoro voice channel to check in!", ephemeral=True
-                )
-                return
+                return await interaction.response.send_message(
+                    "You must be in the Pomodoro voice channel!", ephemeral=True)
             uid = interaction.user.id
             self.timer.present_members.add(uid)
-            self.timer.missed_cycles[uid] = 0
+            self.timer.last_present[uid] = time.monotonic()
             await interaction.response.send_message(
-                f"✅ {interaction.user.display_name}, you are marked **Present**! 🎯", ephemeral=True
-            )
+                f"✅ **{interaction.user.display_name}** marked as Present!", ephemeral=True)
 
-        @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹")
-        async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        @discord.ui.button(label="⏹  Stop", style=discord.ButtonStyle.danger)
+        async def stop(self, interaction: discord.Interaction, _):
             if self.timer.state == "idle":
-                await interaction.response.send_message("Timer is not running!", ephemeral=True)
-                return
+                return await interaction.response.send_message("Timer isn't running!", ephemeral=True)
             if self.timer.task:
                 self.timer.task.cancel()
                 self.timer.task = None
-            self.timer.flush_current_members()
+            self.timer.flush()
             self.timer.state     = "idle"
             self.timer.time_left = 0
             try:
-                await self.timer.voice_channel.edit(name=self.timer.original_channel_name)
+                await self.timer.voice_channel.edit(name=self.timer.original_name)
             except Exception:
                 pass
             await interaction.response.defer()
-            await self.cog.update_status_card(self.timer)
+            await self.cog._push_card(self.timer)
 
     # ── Timer loop ────────────────────────────────────────────────────────
-    async def run_timer(self, timer: PomodoroTimer):
+    async def _run(self, t: PomodoroTimer):
         try:
-            if timer.voice_alerts:
-                await self.play_alert(timer.voice_channel, "focus_start")
-            await self.update_channel_title(timer)
+            await self._alert(t, "focus_start")
+            await self._update_vc_name(t)
+            last_ch = 0
 
-            last_ch_update = 0
-
-            while timer.state != "idle":
+            while t.state != "idle":
                 await asyncio.sleep(1)
-                timer.time_left -= 1
+                t.time_left -= 1
 
-                if timer.time_left <= 0:
-                    if timer.state == "focus":
-                        await self.check_afk_and_kick(timer)
-                        timer.flush_current_members()
-                        timer.state     = "break"
-                        timer.time_left = timer.break_length * 60
-                        timer.present_members.clear()
-                        timer.snapshot_voice_members()
-                        if timer.voice_alerts:
-                            await self.play_alert(timer.voice_channel, "break_start")
+                # Video check every 60 s during focus
+                if t.video_required and t.state == "focus" and t.time_left % 60 == 0:
+                    await self._check_video(t)
+
+                if t.time_left <= 0:
+                    # Phase transition
+                    if t.state == "focus":
+                        await self._check_inactivity(t)
+                        t.flush()
+                        t.state     = "break"
+                        t.time_left = t.break_length * 60
+                        t.present_members.clear()
+                        t.cam_warned.clear()
+                        t.cam_off_since.clear()
+                        t.snapshot()
+                        await self._alert(t, "break_start")
                     else:
-                        timer.flush_current_members()
-                        timer.state         = "focus"
-                        timer.time_left     = timer.focus_length * 60
-                        timer.current_cycle += 1
-                        timer.present_members.clear()
-                        timer.snapshot_voice_members()
-                        if timer.voice_alerts:
-                            await self.play_alert(timer.voice_channel, "focus_start")
+                        t.flush()
+                        t.state         = "focus"
+                        t.time_left     = t.focus_length * 60
+                        t.current_cycle += 1
+                        t.present_members.clear()
+                        t.snapshot()
+                        await self._alert(t, "focus_start")
 
-                    await self.update_status_card(timer)
-                    await self.update_channel_title(timer)
+                    await self._push_card(t)
+                    await self._update_vc_name(t)
 
-                if timer.time_left % 30 == 0:
-                    await self.update_status_card(timer)
+                # Refresh card every 30 s
+                if t.time_left % 30 == 0:
+                    await self._push_card(t)
                     now = time.time()
-                    if now - last_ch_update > 120:
-                        await self.update_channel_title(timer)
-                        last_ch_update = now
+                    if now - last_ch > 120:
+                        await self._update_vc_name(t)
+                        last_ch = now
 
         except asyncio.CancelledError:
             pass
 
-    # ── Status card ───────────────────────────────────────────────────────
-    async def update_status_card(self, timer: PomodoroTimer):
+    # ── Video enforcement ─────────────────────────────────────────────────
+    async def _check_video(self, t: PomodoroTimer):
+        now = time.monotonic()
+        thresh = t.inactive_threshold * 60
+        for member in t.voice_channel.members:
+            if member.bot:
+                continue
+            uid = member.id
+            # If camera has been off longer than threshold
+            off_since = t.cam_off_since.get(uid)
+            if off_since and (now - off_since) >= thresh:
+                if uid not in t.cam_warned:
+                    # First offence — warn via DM
+                    t.cam_warned.add(uid)
+                    try:
+                        embed = discord.Embed(
+                            title="📷  Camera Warning",
+                            description=(
+                                f"Your camera has been off for over **{t.inactive_threshold} minute(s)** "
+                                f"in the Pomodoro session **{t.name}**.\n\n"
+                                "Please turn your camera on or you will be removed from the voice channel!"
+                            ),
+                            color=discord.Color.orange()
+                        )
+                        await member.send(embed=embed)
+                        logger.info(f"Camera warning DM sent to {member}")
+                    except Exception:
+                        pass
+                elif (now - off_since) >= thresh * 2:
+                    # Second offence — kick from VC
+                    try:
+                        await member.move_to(None, reason="Camera off during Pomodoro (video required).")
+                        embed = discord.Embed(
+                            title="🚫  Removed — Camera Off",
+                            description=(
+                                f"You were removed from **{t.voice_channel.name}** because your camera "
+                                f"was off for over **{t.inactive_threshold * 2} minutes** in a "
+                                "camera-required Pomodoro session."
+                            ),
+                            color=discord.Color.red()
+                        )
+                        await member.send(embed=embed)
+                        t.cam_off_since.pop(uid, None)
+                        t.cam_warned.discard(uid)
+                        logger.info(f"Kicked {member} for camera off in Pomodoro")
+                    except Exception:
+                        pass
+
+    # ── Present / inactivity check ────────────────────────────────────────
+    async def _check_inactivity(self, t: PomodoroTimer):
+        now     = time.monotonic()
+        thresh  = t.inactive_threshold * 60
+        for member in t.voice_channel.members:
+            if member.bot:
+                continue
+            uid = member.id
+            last = t.last_present.get(uid, 0)
+            if uid not in t.present_members and (now - last) > thresh:
+                try:
+                    await member.move_to(None, reason="Inactive in Pomodoro session.")
+                    embed = discord.Embed(
+                        title="🛏️  Removed — Inactivity",
+                        description=(
+                            f"You were removed from **{t.voice_channel.name}** because you "
+                            f"didn't press **Present** within {t.inactive_threshold} minute(s).\n"
+                            "Rejoin and stay active! 💪"
+                        ),
+                        color=discord.Color.orange()
+                    )
+                    await member.send(embed=embed)
+                except Exception:
+                    pass
+            else:
+                t.last_present[uid] = now
+
+    # ── Push / refresh card ───────────────────────────────────────────────
+    async def _push_card(self, t: PomodoroTimer):
         colour_map = {
             "focus": discord.Color.from_rgb(*RED_FOCUS),
             "break": discord.Color.from_rgb(*GREEN_BREAK),
             "idle":  discord.Color.light_grey(),
         }
         embed = discord.Embed(
-            title=f"⏱️ {timer.name}",
-            color=colour_map.get(timer.state, discord.Color.light_grey())
+            title=f"⏱️  {t.voice_channel.name}  —  {t.name}",
+            color=colour_map[t.state]
         )
+        mins, secs = t.time_left // 60, t.time_left % 60
+        ts = f"{mins:02d}:{secs:02d}"
 
-        mins, secs = timer.time_left // 60, timer.time_left % 60
-        time_str   = f"{mins:02d}:{secs:02d}"
+        state_msgs = {
+            "focus": f"🎯 **Focus — Cycle #{t.current_cycle}**\nWork hard! Time remaining: **{ts}**",
+            "break": f"☕ **Break Time!**\nRelax and recharge! Time remaining: **{ts}**",
+            "idle":  f"💤 **Idle** — Press **▶ Start** to begin\n`{t.focus_length}m` focus / `{t.break_length}m` break",
+        }
+        embed.description = state_msgs[t.state]
 
-        if timer.state == "focus":
-            embed.description = (
-                f"🎯 **Focus Period — Cycle #{timer.current_cycle}**\n"
-                f"Stay focused and off distractions!\n\n"
-                f"⏱️ **{time_str}** remaining"
-            )
-            embed.set_footer(text="Click ✅ Present to confirm you are active!")
-        elif timer.state == "break":
-            embed.description = (
-                f"☕ **Break Period**\nStretch, hydrate, and relax!\n\n"
-                f"⏱️ **{time_str}** until next focus"
-            )
-            embed.set_footer(text="Next focus cycle starts automatically.")
-        else:
-            embed.description = (
-                "💤 **Timer is IDLE** — press **▶ Start** below to begin.\n\n"
-                f"Session: **{timer.focus_length}m** focus / **{timer.break_length}m** break"
-            )
-            embed.set_footer(text="Pomodoro technique: focused work + regular breaks.")
+        hints = {
+            "focus": "Click ✅ Present to confirm you're active!",
+            "break": "Next focus cycle starts automatically.",
+            "idle":  "Auto-refresh every 30 s · Camera required: " + ("Yes 📷" if t.video_required else "No"),
+        }
+        embed.set_footer(text=hints[t.state])
 
-        view = self.PomodoroView(timer, self)
+        view = self.PomodoroView(t, self)
         file = None
 
         if PILLOW_AVAILABLE:
             try:
-                guild           = self.bot.get_guild(timer.guild_id)
-                participant_ids = [uid for uid, _ in timer.sorted_participants()]
-                avatar_images   = await self._fetch_avatars(participant_ids[:6])
-                img_buf         = await asyncio.get_event_loop().run_in_executor(
-                    None, build_status_image, timer, avatar_images, guild
+                guild   = self.bot.get_guild(t.guild_id)
+                uids    = [uid for uid, _ in t.sorted_participants()]
+                avatars = await self._fetch_avatars(uids[:MAX_MEMBERS])
+                buf     = await asyncio.get_event_loop().run_in_executor(
+                    None, build_card, t, avatars, guild
                 )
-                file = discord.File(img_buf, filename="pomodoro_card.png")
-                embed.set_image(url="attachment://pomodoro_card.png")
+                file = discord.File(buf, filename="pomodoro.png")
+                embed.set_image(url="attachment://pomodoro.png")
             except Exception as e:
-                logger.warning(f"Image card generation failed: {e}")
+                logger.warning(f"Card render error: {e}")
 
+        ch = t.notification_channel
         try:
             if file:
-                # Must re-send to replace the attachment
                 try:
-                    if timer.status_message:
-                        await timer.status_message.delete()
+                    if t.status_message:
+                        await t.status_message.delete()
                 except Exception:
                     pass
-                timer.status_message = await timer.text_channel.send(
-                    embed=embed, view=view, file=file
-                )
+                t.status_message = await ch.send(embed=embed, view=view, file=file)
             else:
-                if timer.status_message:
-                    await timer.status_message.edit(embed=embed, view=view)
+                if t.status_message:
+                    await t.status_message.edit(embed=embed, view=view)
                 else:
-                    timer.status_message = await timer.text_channel.send(embed=embed, view=view)
+                    t.status_message = await ch.send(embed=embed, view=view)
         except Exception as e:
-            logger.debug(f"update_status_card send error: {e}")
+            logger.debug(f"Card send error: {e}")
 
-    # ── Channel name ──────────────────────────────────────────────────────
-    async def update_channel_title(self, timer: PomodoroTimer):
+    # ── VC name updater ───────────────────────────────────────────────────
+    async def _update_vc_name(self, t: PomodoroTimer):
         try:
-            if timer.state == "focus":
-                await timer.voice_channel.edit(name=f"🎯 Focus | {timer.time_left // 60}m")
-            elif timer.state == "break":
-                await timer.voice_channel.edit(name=f"☕ Break | {timer.time_left // 60}m")
-            else:
-                await timer.voice_channel.edit(name=timer.original_channel_name)
+            names = {
+                "focus": f"🎯 Focus | {t.time_left // 60}m",
+                "break": f"☕ Break | {t.time_left // 60}m",
+                "idle":  t.original_name,
+            }
+            await t.voice_channel.edit(name=names[t.state])
         except Exception:
             pass
 
-    # ── AFK kick ──────────────────────────────────────────────────────────
-    async def check_afk_and_kick(self, timer: PomodoroTimer):
-        for member in timer.voice_channel.members:
-            if member.bot:
-                continue
-            uid = member.id
-            if uid not in timer.present_members:
-                timer.missed_cycles[uid] = timer.missed_cycles.get(uid, 0) + 1
-                if timer.missed_cycles[uid] >= timer.inactivity_threshold:
-                    try:
-                        await member.move_to(None, reason="AFK during Pomodoro.")
-                        embed = discord.Embed(
-                            title="🛏️ Disconnected — Inactivity",
-                            description=(
-                                "You were removed from the Pomodoro voice channel for missing "
-                                "3 consecutive **Present** checks. Rejoin and stay active!"
-                            ),
-                            color=discord.Color.orange()
-                        )
-                        await member.send(embed=embed)
-                    except Exception:
-                        pass
-            else:
-                timer.missed_cycles[uid] = 0
-
-    # ── Voice alerts ──────────────────────────────────────────────────────
-    async def play_alert(self, voice_channel, alert_type: str):
-        embed = discord.Embed(color=discord.Color.blurple())
-        if alert_type == "focus_start":
-            embed.title       = "🎯 Focus Time Has Started!"
-            embed.description = "Quiet down and begin studying. Good luck!"
-        elif alert_type == "break_start":
-            embed.title       = "☕ Break Time!"
-            embed.description = "Step away from your screen, hydrate, and stretch!"
+    # ── TTS alerts ────────────────────────────────────────────────────────
+    async def _alert(self, t: PomodoroTimer, kind: str):
+        if not t.voice_alerts:
+            return
+        titles = {
+            "focus_start": ("🎯 Focus Time Has Started!", "Quiet down and get to work!"),
+            "break_start":  ("☕  Break Time!", "Step away, stretch, hydrate!"),
+        }
+        title, desc = titles.get(kind, ("", ""))
+        if not title:
+            return
+        embed = discord.Embed(title=title, description=desc, color=discord.Color.blurple())
         try:
-            await voice_channel.send(embed=embed, tts=True)
+            await t.voice_channel.send(embed=embed, tts=True)
         except Exception:
             pass
 
-    # ── Slash commands ────────────────────────────────────────────────────
-    @app_commands.command(name="pomodoro", description="Create a Pomodoro timer in your current voice channel.")
+    # ════════════════════════════════════════════════════════════════════
+    #  Slash command
+    # ════════════════════════════════════════════════════════════════════
+    @app_commands.command(
+        name="pomodoro",
+        description="Create a Pomodoro timer in your voice channel."
+    )
     @app_commands.describe(
-        focus_length="Focus period in minutes (default 25)",
-        break_length="Break period in minutes (default 5)",
-        name="Name shown on the timer card"
+        focus_length     = "Focus period in minutes (default 25)",
+        break_length     = "Break period in minutes (default 5)",
+        name             = "Session label shown on the card (default: VC name)",
+        notification_channel = "Text or voice channel where the live card is posted",
+        video_required   = "Require camera on — kick if off beyond threshold (default False)",
+        inactive_threshold = "Minutes before inactivity / camera-off action (default 5)",
     )
     async def pomodoro(
         self,
         interaction: discord.Interaction,
-        focus_length: int = 25,
-        break_length: int = 5,
-        name: str = "Focus Session"
+        focus_length:          app_commands.Range[int, 1, 120] = 25,
+        break_length:          app_commands.Range[int, 1, 60]  = 5,
+        name:                  str  = None,
+        notification_channel:  discord.TextChannel = None,
+        video_required:        bool = False,
+        inactive_threshold:    app_commands.Range[int, 1, 60] = 5,
     ):
         if not interaction.guild:
-            await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
-            return
+            return await interaction.response.send_message(
+                "This command can only be used in a server!", ephemeral=True)
 
-        voice_state = interaction.user.voice
-        if not voice_state or not voice_state.channel:
-            await interaction.response.send_message(
-                "❌ You must join a voice channel first!", ephemeral=True
+        # Must be in a voice channel
+        vs = interaction.user.voice
+        if not vs or not vs.channel:
+            return await interaction.response.send_message(
+                "❌ **You must join a voice channel first!** "
+                "No Pomodoro can be created without a voice channel.",
+                ephemeral=True
             )
-            return
 
-        vc = voice_state.channel
-        if vc.id in self.active_timers:
-            await interaction.response.send_message(
-                "❌ A Pomodoro timer is already running in this voice channel!", ephemeral=True
-            )
-            return
+        vc = vs.channel
+
+        # One timer per VC
+        if vc.id in self.timers:
+            return await interaction.response.send_message(
+                f"❌ A Pomodoro timer is already running in **{vc.name}**!", ephemeral=True)
+
+        # Resolve notification channel
+        notif_ch = notification_channel or interaction.channel
 
         timer = PomodoroTimer(
-            guild_id=interaction.guild_id,
-            voice_channel=vc,
-            text_channel=interaction.channel,
-            focus_length=focus_length,
-            break_length=break_length,
-            name=name
+            guild_id             = interaction.guild_id,
+            voice_channel        = vc,
+            notification_channel = notif_ch,
+            focus_length         = focus_length,
+            break_length         = break_length,
+            name                 = name,
+            video_required       = video_required,
+            inactive_threshold   = inactive_threshold,
         )
-        self.active_timers[vc.id] = timer
+        self.timers[vc.id] = timer
 
-        embed = discord.Embed(
-            title="⏱️ Pomodoro Timer Created",
+        # Confirmation embed
+        vid_txt  = "📷 **Camera required** — users off-camera will be warned then removed." \
+                   if video_required else "🎥 Camera not required."
+        conf = discord.Embed(
+            title="⏱️  Pomodoro Created!",
             description=(
-                f"Timer **{name}** (`{focus_length}m` focus / `{break_length}m` break) "
-                f"attached to **{vc.name}**.\n\nPress **▶ Start** on the card below to begin!"
+                f"**Voice Channel:** {vc.mention}\n"
+                f"**Session Name:** {timer.name}\n"
+                f"**Focus / Break:** `{focus_length}m` / `{break_length}m`\n"
+                f"**Notifications:** {notif_ch.mention}\n"
+                f"**Inactivity Threshold:** `{inactive_threshold}` minutes\n"
+                f"{vid_txt}\n\n"
+                f"The live card has been posted in {notif_ch.mention}. Press **▶ Start** to begin!"
             ),
             color=discord.Color.blurple()
         )
-        await interaction.response.send_message(embed=embed)
-        await self.update_status_card(timer)
+        await interaction.response.send_message(embed=conf, ephemeral=True)
+
+        # Post the live card
+        await self._push_card(timer)
 
     @app_commands.command(name="timers", description="List all active Pomodoro timers in this server.")
     async def timers(self, interaction: discord.Interaction):
         if not interaction.guild:
-            await interaction.response.send_message("This command can only be used in a server!", ephemeral=True)
-            return
+            return await interaction.response.send_message(
+                "This command can only be used in a server!", ephemeral=True)
 
-        embed = discord.Embed(title="⏱️ Active Pomodoro Timers", color=discord.Color.blue())
+        embed = discord.Embed(title="⏱️  Active Pomodoro Timers", color=discord.Color.blue())
         lines = [
-            f"• **{t.name}** — <#{vc_id}> — `{'RUNNING' if t.state != 'idle' else 'IDLE'}` "
+            f"• **{t.name}** — {t.voice_channel.mention} — "
+            f"`{'RUNNING' if t.state != 'idle' else 'IDLE'}` "
             f"({t.focus_length}/{t.break_length}m)"
-            for vc_id, t in self.active_timers.items()
+            f"{'  📷' if t.video_required else ''}"
+            for vc_id, t in self.timers.items()
             if t.guild_id == interaction.guild_id
         ]
-        embed.description = "\n".join(lines) or "No active Pomodoro timers in this server."
+        embed.description = "\n".join(lines) if lines else "No active Pomodoro timers in this server."
         await interaction.response.send_message(embed=embed)
 
 
