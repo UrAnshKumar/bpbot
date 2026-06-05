@@ -35,7 +35,7 @@ class WelcomeSetupModalPart1(discord.ui.Modal, title="Welcome Setup - Part 1/2")
     
     normal_text = discord.ui.TextInput(
         label="Normal Text (Outside Embed)",
-        style=discord.ui.TextStyle.paragraph,
+        style=discord.TextStyle.paragraph,
         placeholder="e.g. Hey {username}, welcome to {server}! You are member #{member_count}.",
         default="Hey {username}, welcome to **{server}**! 🎉 Please check out {channel} to get started! You are member #{member_count}.",
         required=True,
@@ -44,7 +44,7 @@ class WelcomeSetupModalPart1(discord.ui.Modal, title="Welcome Setup - Part 1/2")
     
     author_name = discord.ui.TextInput(
         label="Embed Author Name",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. Server Welcome Team",
         default="New Member Arrived!",
         required=False,
@@ -53,7 +53,7 @@ class WelcomeSetupModalPart1(discord.ui.Modal, title="Welcome Setup - Part 1/2")
     
     author_icon = discord.ui.TextInput(
         label="Embed Author Icon URL",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. https://domain.com/icon.png",
         default="https://i.imgur.com/8Q9Z9oX.png",
         required=False,
@@ -62,7 +62,7 @@ class WelcomeSetupModalPart1(discord.ui.Modal, title="Welcome Setup - Part 1/2")
     
     embed_title = discord.ui.TextInput(
         label="Embed Title",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. Welcome to our Server!",
         default="👋 Welcome to our community!",
         required=False,
@@ -71,7 +71,7 @@ class WelcomeSetupModalPart1(discord.ui.Modal, title="Welcome Setup - Part 1/2")
     
     embed_thumbnail = discord.ui.TextInput(
         label="Embed Side Square Logo (Thumbnail URL)",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. https://domain.com/logo.png or {user_avatar}",
         default="{user_avatar}",
         required=False,
@@ -135,7 +135,7 @@ class WelcomeSetupModalPart2(discord.ui.Modal, title="Welcome Setup - Part 2/2")
     
     embed_desc = discord.ui.TextInput(
         label="Embed Description (Supports Placeholders)",
-        style=discord.ui.TextStyle.paragraph,
+        style=discord.TextStyle.paragraph,
         placeholder="e.g. Welcome {username} to {server}...",
         default=(
             "✨ **Welcome to {server}, {username}!** ✨\n\n"
@@ -159,7 +159,7 @@ class WelcomeSetupModalPart2(discord.ui.Modal, title="Welcome Setup - Part 2/2")
     
     embed_footer = discord.ui.TextInput(
         label="Embed Footer Text",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. Enjoy your stay! | Member #{member_count}",
         default="Hope you have an amazing time here!",
         required=False,
@@ -168,7 +168,7 @@ class WelcomeSetupModalPart2(discord.ui.Modal, title="Welcome Setup - Part 2/2")
     
     embed_banner = discord.ui.TextInput(
         label="Embed Bottom Banner Image URL",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. https://domain.com/banner.png",
         default="https://i.imgur.com/aC3H2Q2.png",
         required=False,
@@ -177,7 +177,7 @@ class WelcomeSetupModalPart2(discord.ui.Modal, title="Welcome Setup - Part 2/2")
     
     embed_color = discord.ui.TextInput(
         label="Embed Accent Hex Color",
-        style=discord.ui.TextStyle.short,
+        style=discord.TextStyle.short,
         placeholder="e.g. #5865F2",
         default="#5865F2",
         required=False,
