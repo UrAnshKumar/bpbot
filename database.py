@@ -91,6 +91,16 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
+    
+    # Create user_todos table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            task TEXT,
+            completed INTEGER DEFAULT 0
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -346,3 +356,53 @@ def get_top_users(guild_id: int, limit: int = 10) -> list:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+# Todo List Helpers
+def get_todos(user_id: int) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_todos WHERE user_id = ? ORDER BY id ASC", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def add_todo(user_id: int, task: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO user_todos (user_id, task) VALUES (?, ?)", (user_id, task))
+    conn.commit()
+    conn.close()
+
+def add_bulk_todos(user_id: int, tasks: list):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.executemany("INSERT INTO user_todos (user_id, task) VALUES (?, ?)", [(user_id, task) for task in tasks])
+    conn.commit()
+    conn.close()
+
+def toggle_todo(todo_id: int, user_id: int) -> bool:
+    """Toggles completion status. Returns True if successfully toggled."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT completed FROM user_todos WHERE id = ? AND user_id = ?", (todo_id, user_id))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+    
+    new_status = 0 if row[0] == 1 else 1
+    cursor.execute("UPDATE user_todos SET completed = ? WHERE id = ?", (new_status, todo_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def delete_todo(todo_id: int, user_id: int) -> bool:
+    """Deletes a todo. Returns True if successfully deleted."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_todos WHERE id = ? AND user_id = ?", (todo_id, user_id))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
