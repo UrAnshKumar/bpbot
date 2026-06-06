@@ -35,6 +35,8 @@ class WelcomeBot(commands.Bot):
         await self.load_extension("cogs.pomodoro")
         logger.info("Loading Leaderboard Cog...")
         await self.load_extension("cogs.leaderboard")
+        logger.info("Loading Todo Cog...")
+        await self.load_extension("cogs.todo")
 
     async def on_ready(self):
         logger.info(f"Bot logged in as {self.user.name}#{self.user.discriminator} (ID: {self.user.id})")
