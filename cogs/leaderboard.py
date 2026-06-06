@@ -4,6 +4,7 @@ from discord.ext import commands
 import logging
 import io
 import datetime
+import math
 from PIL import Image, ImageDraw
 
 import database
