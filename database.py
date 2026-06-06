@@ -70,8 +70,16 @@ def init_db():
             guild_id INTEGER,
             user_id INTEGER,
             reason TEXT,
-            moderator_id INTEGER,
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Create msg_allowed_roles table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS msg_allowed_roles (
+            guild_id INTEGER,
+            role_id INTEGER,
+            PRIMARY KEY (guild_id, role_id)
         )
     """)
     conn.commit()
@@ -267,3 +275,32 @@ def clear_warnings(guild_id: int, user_id: int):
     )
     conn.commit()
     conn.close()
+
+# Msg Command Allowed Role Helpers
+def add_msg_role(guild_id: int, role_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO msg_allowed_roles (guild_id, role_id) VALUES (?, ?)",
+        (guild_id, role_id)
+    )
+    conn.commit()
+    conn.close()
+
+def remove_msg_role(guild_id: int, role_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM msg_allowed_roles WHERE guild_id = ? AND role_id = ?",
+        (guild_id, role_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_msg_roles(guild_id: int) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT role_id FROM msg_allowed_roles WHERE guild_id = ?", (guild_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
