@@ -101,6 +101,45 @@ def init_db():
             completed INTEGER DEFAULT 0
         )
     """)
+    
+    # Create economy table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS economy (
+            guild_id INTEGER,
+            user_id INTEGER,
+            coins INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+    
+    # Create ranked_roles table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ranked_roles (
+            guild_id INTEGER,
+            hours_required INTEGER,
+            role_id INTEGER,
+            bp_coins_award INTEGER,
+            PRIMARY KEY (guild_id, hours_required)
+        )
+    """)
+    
+    # Create rank_channels table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rank_channels (
+            guild_id INTEGER PRIMARY KEY,
+            channel_id INTEGER
+        )
+    """)
+    
+    # Create awarded_ranks table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS awarded_ranks (
+            guild_id INTEGER,
+            user_id INTEGER,
+            role_id INTEGER,
+            PRIMARY KEY (guild_id, user_id, role_id)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -406,3 +445,110 @@ def delete_todo(todo_id: int, user_id: int) -> bool:
     conn.commit()
     conn.close()
     return deleted
+
+# ==========================================
+# Economy & Ranked Roles Helpers
+# ==========================================
+
+def get_user_coins(guild_id: int, user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT coins FROM economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def add_user_coins(guild_id: int, user_id: int, coins: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO economy (guild_id, user_id, coins)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            coins = coins + excluded.coins
+    """, (guild_id, user_id, coins))
+    conn.commit()
+    
+    # Fetch updated balance
+    cursor.execute("SELECT coins FROM economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def set_user_coins(guild_id: int, user_id: int, coins: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO economy (guild_id, user_id, coins)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            coins = excluded.coins
+    """, (guild_id, user_id, coins))
+    conn.commit()
+    conn.close()
+
+def get_ranked_roles(guild_id: int) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ranked_roles WHERE guild_id = ? ORDER BY hours_required ASC", (guild_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def add_ranked_role(guild_id: int, hours_required: int, role_id: int, bp_coins_award: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO ranked_roles (guild_id, hours_required, role_id, bp_coins_award)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, hours_required) DO UPDATE SET
+            role_id = excluded.role_id,
+            bp_coins_award = excluded.bp_coins_award
+    """, (guild_id, hours_required, role_id, bp_coins_award))
+    conn.commit()
+    conn.close()
+
+def remove_ranked_role(guild_id: int, hours_required: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM ranked_roles WHERE guild_id = ? AND hours_required = ?", (guild_id, hours_required))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+def get_rank_channel(guild_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_id FROM rank_channels WHERE guild_id = ?", (guild_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_rank_channel(guild_id: int, channel_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO rank_channels (guild_id, channel_id)
+        VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            channel_id = excluded.channel_id
+    """, (guild_id, channel_id))
+    conn.commit()
+    conn.close()
+
+def is_rank_awarded(guild_id: int, user_id: int, role_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM awarded_ranks WHERE guild_id = ? AND user_id = ? AND role_id = ?", (guild_id, user_id, role_id))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_rank_awarded(guild_id: int, user_id: int, role_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO awarded_ranks (guild_id, user_id, role_id) VALUES (?, ?, ?)", (guild_id, user_id, role_id))
+    conn.commit()
+    conn.close()
