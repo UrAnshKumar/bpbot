@@ -34,6 +34,23 @@ def get_ffmpeg_path() -> str:
             return candidate
     return "ffmpeg"
 
+def load_opus_lib():
+    """Dynamically locates and loads the precompiled Opus DLL shipped within discord.py site-packages on Windows."""
+    if not discord.opus.is_loaded():
+        try:
+            discord_dir = os.path.dirname(discord.__file__)
+            import struct
+            is_64bit = struct.calcsize("P") * 8 == 64
+            dll_name = "libopus-0.x64.dll" if is_64bit else "libopus-0.x86.dll"
+            dll_path = os.path.join(discord_dir, "bin", dll_name)
+            if os.path.exists(dll_path):
+                discord.opus.load_opus(dll_path)
+                logger.info(f"Successfully loaded Opus library: {dll_path}")
+            else:
+                discord.opus.load_opus("libopus-0.dll")
+        except Exception as e:
+            logger.warning(f"Unable to load Opus library automatically: {e}")
+
 # ─── Color Palette ────────────────────────────────────────────────────────────
 _BG_TOP    = (  6,   8,  22)          # Deep midnight navy
 _BG_BOT    = ( 12,  20,  52)          # Midnight blue
@@ -603,6 +620,7 @@ class Pomodoro(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot      = bot
         self.sessions = {}   # voice_channel_id → PomodoroSession
+        load_opus_lib()
 
     @app_commands.command(name="pomodoro", description="Start a Pomodoro study session in your voice channel.")
     @app_commands.describe(
