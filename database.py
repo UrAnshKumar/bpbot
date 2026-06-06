@@ -70,9 +70,15 @@ def init_db():
             guild_id INTEGER,
             user_id INTEGER,
             reason TEXT,
+            moderator_id INTEGER,
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Check if moderator_id column exists, if not add it
+    cursor.execute("PRAGMA table_info(user_warnings)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "moderator_id" not in columns:
+        cursor.execute("ALTER TABLE user_warnings ADD COLUMN moderator_id INTEGER")
     
     # Create msg_allowed_roles table
     cursor.execute("""
@@ -138,6 +144,30 @@ def init_db():
             user_id INTEGER,
             role_id INTEGER,
             PRIMARY KEY (guild_id, user_id, role_id)
+        )
+    """)
+    
+    # Create user_profiles table (tags, bio per guild)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            guild_id INTEGER,
+            user_id INTEGER,
+            tags TEXT DEFAULT '',
+            bio TEXT DEFAULT '',
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+    
+    # Create study_streaks table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS study_streaks (
+            guild_id INTEGER,
+            user_id INTEGER,
+            current_streak INTEGER DEFAULT 0,
+            longest_streak INTEGER DEFAULT 0,
+            last_study_date TEXT DEFAULT '',
+            daily_minutes INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
         )
     """)
     conn.commit()
@@ -552,3 +582,126 @@ def mark_rank_awarded(guild_id: int, user_id: int, role_id: int):
     cursor.execute("INSERT OR IGNORE INTO awarded_ranks (guild_id, user_id, role_id) VALUES (?, ?, ?)", (guild_id, user_id, role_id))
     conn.commit()
     conn.close()
+
+# ==========================================
+# User Profile Helpers
+# ==========================================
+
+def get_profile(guild_id: int, user_id: int) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_profiles WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {"guild_id": guild_id, "user_id": user_id, "tags": "", "bio": ""}
+
+def set_profile_tags(guild_id: int, user_id: int, tags: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_profiles (guild_id, user_id, tags)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET tags = excluded.tags
+    """, (guild_id, user_id, tags))
+    conn.commit()
+    conn.close()
+
+def set_profile_bio(guild_id: int, user_id: int, bio: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO user_profiles (guild_id, user_id, bio)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET bio = excluded.bio
+    """, (guild_id, user_id, bio))
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# Streak Helpers
+# ==========================================
+
+def get_streak(guild_id: int, user_id: int) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM study_streaks WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {"guild_id": guild_id, "user_id": user_id, "current_streak": 0, "longest_streak": 0,
+            "last_study_date": "", "daily_minutes": 0}
+
+def update_streak(guild_id: int, user_id: int, minutes_earned: int) -> dict:
+    """
+    Called after XP is awarded. Tracks daily study minutes.
+    A streak day is credited when >= 120 minutes (2 hours) are studied in one calendar day.
+    Returns the updated streak dict.
+    """
+    import datetime
+    today = datetime.date.today().isoformat()
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM study_streaks WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cursor.fetchone()
+
+    if row:
+        data = dict(row)
+    else:
+        data = {"current_streak": 0, "longest_streak": 0, "last_study_date": "", "daily_minutes": 0}
+
+    last_date = data["last_study_date"]
+    daily_minutes = data["daily_minutes"]
+    current_streak = data["current_streak"]
+    longest_streak = data["longest_streak"]
+
+    if last_date == today:
+        # Same day — accumulate minutes
+        daily_minutes += minutes_earned
+    else:
+        # New day — check if yesterday
+        try:
+            last = datetime.date.fromisoformat(last_date) if last_date else None
+            yesterday = datetime.date.today() - datetime.timedelta(days=1)
+            if last == yesterday:
+                # Continuing streak — carry over, start fresh daily tally
+                daily_minutes = minutes_earned
+            else:
+                # Gap in streak — reset
+                daily_minutes = minutes_earned
+                current_streak = 0
+        except Exception:
+            daily_minutes = minutes_earned
+            current_streak = 0
+
+    # Credit streak day only when 2h threshold first crossed today
+    prev_minutes = data["daily_minutes"] if last_date == today else 0
+    threshold = 120
+    if prev_minutes < threshold <= daily_minutes and last_date != today:
+        current_streak += 1
+        if current_streak > longest_streak:
+            longest_streak = current_streak
+    elif last_date != today and daily_minutes >= threshold:
+        current_streak += 1
+        if current_streak > longest_streak:
+            longest_streak = current_streak
+
+    cursor.execute("""
+        INSERT INTO study_streaks (guild_id, user_id, current_streak, longest_streak, last_study_date, daily_minutes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            current_streak = excluded.current_streak,
+            longest_streak = excluded.longest_streak,
+            last_study_date = excluded.last_study_date,
+            daily_minutes = excluded.daily_minutes
+    """, (guild_id, user_id, current_streak, longest_streak, today, daily_minutes))
+    conn.commit()
+    conn.close()
+    return {"current_streak": current_streak, "longest_streak": longest_streak,
+            "daily_minutes": daily_minutes, "last_study_date": today}
