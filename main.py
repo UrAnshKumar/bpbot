@@ -33,6 +33,8 @@ class WelcomeBot(commands.Bot):
         await self.load_extension("cogs.moderation")
         logger.info("Loading Pomodoro Cog...")
         await self.load_extension("cogs.pomodoro")
+        logger.info("Loading Leaderboard Cog...")
+        await self.load_extension("cogs.leaderboard")
 
     async def on_ready(self):
         logger.info(f"Bot logged in as {self.user.name}#{self.user.discriminator} (ID: {self.user.id})")
