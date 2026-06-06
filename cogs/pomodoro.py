@@ -8,9 +8,31 @@ import random
 import datetime
 from datetime import timedelta
 import aiohttp
+import os
+import tempfile
+from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+import database
 
 logger = logging.getLogger("pomodoro")
+
+def get_ffmpeg_path() -> str:
+    """Helper to locate the FFmpeg executable dynamically, prioritizing WinGet installation directories."""
+    localappdata = os.getenv("LOCALAPPDATA", "")
+    candidates = [
+        "ffmpeg",
+        os.path.join(localappdata, "Microsoft", "WinGet", "Packages", "BtbN.FFmpeg.GPL_Microsoft.Winget.Source_8wekyb3d8bbwe", "ffmpeg-N-124767-ge8031e5b9a-win64-gpl", "bin", "ffmpeg.exe"),
+        os.path.join(localappdata, "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe", "ffmpeg-8.1.1-full_build", "bin", "ffmpeg.exe"),
+        os.path.join(localappdata, "Microsoft", "WinGet", "Links", "ffmpeg.exe")
+    ]
+    for candidate in candidates:
+        if candidate == "ffmpeg":
+            import shutil
+            if shutil.which("ffmpeg"):
+                return "ffmpeg"
+        elif os.path.exists(candidate):
+            return candidate
+    return "ffmpeg"
 
 # ─── Color Palette ────────────────────────────────────────────────────────────
 _BG_TOP    = (  6,   8,  22)          # Deep midnight navy
@@ -148,6 +170,17 @@ def crop_circle(img: Image.Image, size: int) -> Image.Image:
     return out
 
 
+async def is_moderator(interaction: discord.Interaction) -> bool:
+    """Checks if the interaction user is an administrator or has a registered moderator role."""
+    if not interaction.guild:
+        return False
+    if interaction.user.guild_permissions.administrator:
+        return True
+    mod_roles = database.get_mod_roles(interaction.guild_id)
+    user_role_ids = [role.id for role in interaction.user.roles]
+    return any(r_id in mod_roles for r_id in user_role_ids)
+
+
 # ─── Session Class ────────────────────────────────────────────────────────────
 
 class PomodoroSession:
@@ -164,6 +197,7 @@ class PomodoroSession:
         name: str,
         video_required: bool,
         inactive_threshold: int,
+        voice_alert: bool,
     ):
         self.cog                  = cog
         self.voice_channel        = voice_channel
@@ -175,6 +209,7 @@ class PomodoroSession:
         self.name              = name
         self.video_required    = video_required
         self.inactive_threshold = inactive_threshold * 60
+        self.voice_alert        = voice_alert
 
         self.current_phase  = "FOCUS"
         self.phase_start    = datetime.datetime.now()
@@ -197,6 +232,46 @@ class PomodoroSession:
 
         self.task = asyncio.create_task(self.update_loop())
 
+    async def play_voice_alert(self, text: str):
+        if not self.voice_alert:
+            return
+
+        guild = self.voice_channel.guild
+        try:
+            voice_client = discord.utils.get(self.cog.bot.voice_clients, guild=guild)
+            if not voice_client:
+                voice_client = await self.voice_channel.connect()
+            elif voice_client.channel != self.voice_channel:
+                await voice_client.move_to(self.voice_channel)
+
+            if voice_client.is_playing():
+                voice_client.stop()
+
+            temp_dir = tempfile.gettempdir()
+            filename = os.path.join(temp_dir, f"pomodoro_tts_{guild.id}.mp3")
+
+            def save_tts():
+                tts = gTTS(text=text, lang='en')
+                tts.save(filename)
+
+            await asyncio.to_thread(save_tts)
+
+            ffmpeg_path = get_ffmpeg_path()
+            audio_source = discord.FFmpegPCMAudio(filename, executable=ffmpeg_path)
+
+            def after_playing(error):
+                if error:
+                    logger.error(f"Error playing voice alert: {error}")
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception as ex:
+                    logger.warning(f"Failed to delete temp TTS file: {ex}")
+
+            voice_client.play(audio_source, after=after_playing)
+        except Exception as e:
+            logger.error(f"Failed to play voice alert: {e}")
+
     # ── Update Loop ───────────────────────────────────────────────────────────
 
     async def update_loop(self):
@@ -210,26 +285,34 @@ class PomodoroSession:
 
                 # Phase transition
                 if remaining <= 0:
+                    members_to_mention = [m.mention for m in self.voice_channel.members if not m.bot]
+                    mentions_str = " ".join(members_to_mention)
+                    mention_part = f"\n{mentions_str}" if members_to_mention else ""
+
                     if self.current_phase == "FOCUS":
                         self.current_phase = "BREAK"
                         self.phase_end     = now + timedelta(seconds=self.break_length)
                         try:
                             await self.notification_channel.send(
                                 f"🔔 **{self.name}** — Focus done! "
-                                f"Enjoy your **{self.break_length // 60}m** break. 🟢"
+                                f"Enjoy your **{self.break_length // 60}m** break. 🟢{mention_part}"
                             )
                         except Exception:
                             pass
+                        if self.voice_alert:
+                            await self.play_voice_alert("Times up, streach and rehydrate see in a few")
                     else:
                         self.current_phase = "FOCUS"
                         self.phase_end     = now + timedelta(seconds=self.focus_length)
                         try:
                             await self.notification_channel.send(
                                 f"🔴 **{self.name}** — Break over! "
-                                f"Back to focus for **{self.focus_length // 60}m**. 🚀"
+                                f"Back to focus for **{self.focus_length // 60}m**. 🚀{mention_part}"
                             )
                         except Exception:
                             pass
+                        if self.voice_alert:
+                            await self.play_voice_alert("Now focus lets concentrate to our work")
                     self.phase_start = now
                     remaining        = int((self.phase_end - now).total_seconds())
 
@@ -497,16 +580,25 @@ class PomodoroSession:
         fp.seek(0)
         return discord.File(fp, filename="timer.png")
 
-    def stop(self):
+    async def stop(self):
         """Cancels the update loop and marks the session as inactive."""
         self.active = False
         self.task.cancel()
+        guild = self.voice_channel.guild
+        voice_client = discord.utils.get(self.cog.bot.voice_clients, guild=guild)
+        if voice_client and voice_client.channel == self.voice_channel:
+            try:
+                await voice_client.disconnect()
+            except Exception as e:
+                logger.warning(f"Failed to disconnect from voice channel: {e}")
 
 
 # ─── Pomodoro Cog ─────────────────────────────────────────────────────────────
 
 class Pomodoro(commands.Cog):
     """Cog running pomodoro timers and camera requirements per voice channel."""
+
+    destroy_group = app_commands.Group(name="destroy", description="Destroy active sessions.")
 
     def __init__(self, bot: commands.Bot):
         self.bot      = bot
@@ -520,7 +612,8 @@ class Pomodoro(commands.Cog):
         timer_channel="The text channel where the timer status card will be refreshed.",
         notification_channel="The channel where phase start alerts will be posted.",
         video_required="Enforce camera sharing (True/False).",
-        inactive_threshold="Allowed camera-off time in minutes before kick (e.g. 2)."
+        inactive_threshold="Allowed camera-off time in minutes before kick (e.g. 2).",
+        voice_alert="Whether to play custom TTS voice alerts in the voice channel (True/False)."
     )
     async def pomodoro(
         self,
@@ -531,10 +624,18 @@ class Pomodoro(commands.Cog):
         timer_channel: discord.abc.GuildChannel,
         notification_channel: discord.abc.GuildChannel,
         video_required: bool,
-        inactive_threshold: int
+        inactive_threshold: int,
+        voice_alert: bool = False
     ):
         if not interaction.guild:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not await is_moderator(interaction):
+            await interaction.response.send_message(
+                "❌ You do not have permission to run this command. (Moderator role or Administrator permission required)",
+                ephemeral=True
+            )
             return
 
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -570,6 +671,7 @@ class Pomodoro(commands.Cog):
             name=name,
             video_required=video_required,
             inactive_threshold=inactive_threshold,
+            voice_alert=voice_alert,
         )
         self.sessions[voice_channel.id] = session
 
@@ -585,9 +687,13 @@ class Pomodoro(commands.Cog):
             msg = await timer_channel.send(embed=embed, file=file)
             session.message = msg
 
+            members_to_mention = [m.mention for m in voice_channel.members if not m.bot]
+            mentions_str = " ".join(members_to_mention)
+            mention_part = f"\n{mentions_str}" if members_to_mention else ""
+
             await notification_channel.send(
                 f"🔴 **Focus session started for {voice_channel.mention}!** "
-                f"Back to focus for **{focus_length} minutes**. 🚀"
+                f"Back to focus for **{focus_length} minutes**. 🚀{mention_part}"
             )
             await interaction.followup.send(
                 f"✅ **Pomodoro session successfully started!**\n"
@@ -596,8 +702,10 @@ class Pomodoro(commands.Cog):
                 f"• **Camera Check:** {'Enabled' if video_required else 'Disabled'} "
                 f"(Threshold: {inactive_threshold}m)"
             )
+            if voice_alert:
+                await session.play_voice_alert("Now focus lets concentrate to our work")
         except Exception as e:
-            session.stop()
+            await session.stop()
             self.sessions.pop(voice_channel.id, None)
             await interaction.followup.send(f"❌ Failed to start session: {e}")
 
@@ -645,6 +753,50 @@ class Pomodoro(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @destroy_group.command(name="pomodoro", description="Destroy the active Pomodoro session in your voice channel.")
+    async def destroy_pomodoro(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not await is_moderator(interaction):
+            await interaction.response.send_message(
+                "❌ You do not have permission to run this command. (Moderator role or Administrator permission required)",
+                ephemeral=True
+            )
+            return
+
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message(
+                "❌ You must join a voice channel first to destroy its Pomodoro session!", ephemeral=True
+            )
+            return
+
+        voice_channel = interaction.user.voice.channel
+        session = self.sessions.get(voice_channel.id)
+
+        if not session:
+            await interaction.response.send_message(
+                f"❌ No active Pomodoro session was found in your voice channel **{voice_channel.name}**.",
+                ephemeral=True
+            )
+            return
+
+        await session.stop()
+        self.sessions.pop(voice_channel.id, None)
+
+        try:
+            await session.notification_channel.send(
+                f"ℹ️ Pomodoro session in **{voice_channel.name}** was destroyed by {interaction.user.mention}."
+            )
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ **Pomodoro session '{session.name}' in {voice_channel.mention} has been destroyed.**",
+            ephemeral=False
+        )
+
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -668,7 +820,7 @@ class Pomodoro(commands.Cog):
 
                 non_bots = [m for m in before.channel.members if not m.bot]
                 if not non_bots:
-                    session.stop()
+                    await session.stop()
                     self.sessions.pop(before.channel.id, None)
                     try:
                         await session.notification_channel.send(
