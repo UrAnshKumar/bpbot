@@ -231,10 +231,9 @@ class TodoMainView(discord.ui.View):
         
         file = await generate_todo_card(self.member, tasks, self.current_page)
         
-        embed = discord.Embed(color=discord.Color.gold())
-        embed.set_image(url="attachment://todo.png")
+        content = f"📝 **{self.member.display_name}'s To-Do List**"
         
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        await interaction.response.edit_message(content=content, attachments=[file], view=self, embed=None)
 
     @discord.ui.button(label="Check Todo", style=discord.ButtonStyle.success, custom_id="todo_check")
     async def check_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -305,11 +304,10 @@ class Todo(commands.Cog):
             
             file = await generate_todo_card(interaction.user, tasks, 1)
             
-            embed = discord.Embed(color=discord.Color.gold())
-            embed.set_image(url="attachment://todo.png")
+            content = f"📝 **{interaction.user.display_name}'s To-Do List**"
             
             view = TodoMainView(interaction.user, 1, total_pages)
-            await interaction.followup.send(embed=embed, file=file, view=view)
+            await interaction.followup.send(content=content, file=file, view=view)
         except Exception as e:
             logger.error(f"Error in /todo: {e}")
             await interaction.followup.send(f"❌ Failed to load todo list: {e}")
