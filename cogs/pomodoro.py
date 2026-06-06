@@ -320,6 +320,7 @@ class PomodoroSession:
                             for member in self.voice_channel.members:
                                 if not member.bot:
                                     database.add_user_xp(guild_id, member.id, xp_earned)
+                                    database.update_streak(guild_id, member.id, xp_earned)
                                     self.bot.dispatch("study_xp_added", member, xp_earned)
                             await self.notification_channel.send(
                                 f"✨ Everyone in the study group just earned **{xp_earned} XP**!"
