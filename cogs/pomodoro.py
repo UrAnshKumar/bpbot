@@ -404,19 +404,15 @@ class PomodoroSession:
 
                 # Render and post the updated card
                 file  = await self.generate_card_file(remaining)
-                embed = discord.Embed(
-                    title=f"⏳ Active Study Timer: {self.name}",
-                    description=(
-                        f"Active in: {self.voice_channel.mention} | "
-                        f"Focus: {self.focus_length // 60}m | Break: {self.break_length // 60}m"
-                    ),
-                    color=discord.Color.gold() if self.current_phase == "FOCUS" else discord.Color.green(),
+                content = (
+                    f"⏳ **Active Study Timer: {self.name}**\n"
+                    f"Active in: {self.voice_channel.mention} | "
+                    f"Focus: {self.focus_length // 60}m | Break: {self.break_length // 60}m"
                 )
-                embed.set_image(url="attachment://timer.png")
 
                 if self.message:
                     try:
-                        await self.message.edit(embed=embed, attachments=[file])
+                        await self.message.edit(content=content, attachments=[file], embed=None)
                     except Exception as e:
                         logger.error(f"Failed to refresh timer card: {e}")
 
@@ -704,15 +700,13 @@ class Pomodoro(commands.Cog):
         self.sessions[voice_channel.id] = session
 
         file  = await session.generate_card_file(focus_length * 60)
-        embed = discord.Embed(
-            title=f"⏳ Active Study Timer: {session.name}",
-            description=f"Active in: {voice_channel.mention} | Focus: {focus_length}m | Break: {break_length}m",
-            color=discord.Color.gold(),
+        content = (
+            f"⏳ **Active Study Timer: {session.name}**\n"
+            f"Active in: {voice_channel.mention} | Focus: {focus_length}m | Break: {break_length}m"
         )
-        embed.set_image(url="attachment://timer.png")
 
         try:
-            msg = await timer_channel.send(embed=embed, file=file)
+            msg = await timer_channel.send(content=content, file=file)
             session.message = msg
 
             members_to_mention = [m.mention for m in voice_channel.members if not m.bot]
