@@ -12,6 +12,16 @@ logger = logging.getLogger("moderation")
 # List of common vulgar words
 VULGAR_WORDS = {'fuck', 'shit', 'bitch', 'asshole', 'cunt', 'nigger', 'faggot', 'dick', 'pussy', 'bastard', 'motherfucker'}
 
+def parse_color(color_hex: str) -> discord.Color:
+    """Parses a hex color string into a discord.Color object, defaulting to Blurple on failure."""
+    if not color_hex:
+        return discord.Color.blurple()
+    color_hex = color_hex.strip().lstrip('#')
+    try:
+        return discord.Color(int(color_hex, 16))
+    except ValueError:
+        return discord.Color.blurple()
+
 def check_vulgar(content: str) -> bool:
     """Checks if the content contains any vulgar words using simple word token search."""
     cleaned = re.sub(r'[^a-zA-Z\s]', '', content).lower()
@@ -47,6 +57,203 @@ async def is_moderator_check(interaction: discord.Interaction) -> bool:
     )
     return False
 
+async def is_msg_allowed(interaction: discord.Interaction) -> bool:
+    """Checks if the interaction user is an administrator or has an authorized role for /msg."""
+    if not interaction.guild:
+        await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        return False
+    if interaction.user.guild_permissions.administrator:
+        return True
+    allowed_roles = database.get_msg_roles(interaction.guild_id)
+    user_role_ids = [role.id for role in interaction.user.roles]
+    if any(r_id in allowed_roles for r_id in user_role_ids):
+        return True
+    await interaction.response.send_message(
+        "❌ You do not have permission to run this command. (Administrator or authorized role required)",
+        ephemeral=True
+    )
+    return False
+
+class MsgSetupModalPart1(discord.ui.Modal, title="Custom Embed Message - Part 1/2"):
+    """Part 1 of the custom embed: Channel, normal text and basic author info."""
+    
+    normal_text = discord.ui.TextInput(
+        label="Normal Text (Outside Embed)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Text to display above/outside the embed (optional).",
+        required=False,
+        max_length=500
+    )
+    
+    author_name = discord.ui.TextInput(
+        label="Embed Author Name",
+        style=discord.TextStyle.short,
+        placeholder="Name in author field (optional).",
+        required=False,
+        max_length=100
+    )
+    
+    author_icon = discord.ui.TextInput(
+        label="Embed Author Icon URL",
+        style=discord.TextStyle.short,
+        placeholder="URL for the author icon image (optional).",
+        required=False,
+        max_length=256
+    )
+    
+    embed_title = discord.ui.TextInput(
+        label="Embed Title",
+        style=discord.TextStyle.short,
+        placeholder="Title of the embed (optional).",
+        required=False,
+        max_length=100
+    )
+    
+    embed_thumbnail = discord.ui.TextInput(
+        label="Embed Side Square Logo (Thumbnail URL)",
+        style=discord.TextStyle.short,
+        placeholder="URL for thumbnail square (optional).",
+        required=False,
+        max_length=256
+    )
+
+    def __init__(self, cog, channel: discord.TextChannel, user: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.channel = channel
+        # Set defaults to the user's details as requested: "with his name and icon"
+        self.author_name.default = user.display_name
+        self.author_icon.default = str(user.display_avatar.url)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Store Part 1 data temporarily
+        self.cog.msg_temp_settings[interaction.user.id] = {
+            "channel_id": self.channel.id,
+            "normal_text": self.normal_text.value,
+            "embed_author_name": self.author_name.value,
+            "embed_author_icon": self.author_icon.value,
+            "embed_title": self.embed_title.value,
+            "embed_thumbnail": self.embed_thumbnail.value
+        }
+        
+        view = MsgSetupPart2View(self.cog, self.channel)
+        await interaction.response.send_message(
+            content=(
+                "✅ **Part 1 captured!**\n"
+                "Click the button below to fill in Part 2 (Description, Footer, Banner & Accent Color) and send the message."
+            ),
+            view=view,
+            ephemeral=True
+        )
+
+class MsgSetupPart2View(discord.ui.View):
+    """Temporary view to launch part 2 of the custom message wizard."""
+    def __init__(self, cog, channel: discord.TextChannel):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel = channel
+
+    @discord.ui.button(label="Configure Step 2: Content & Images", style=discord.ButtonStyle.primary, emoji="✉️")
+    async def configure_part2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in self.cog.msg_temp_settings:
+            await interaction.response.send_message(
+                "❌ You do not have an active /msg setup session. Use `/msg` first.",
+                ephemeral=True
+            )
+            return
+
+        modal = MsgSetupModalPart2(self.cog, self.channel)
+        await interaction.response.send_modal(modal)
+        button.disabled = True
+        await interaction.message.edit(view=self)
+
+class MsgSetupModalPart2(discord.ui.Modal, title="Custom Embed Message - Part 2/2"):
+    """Part 2 of the custom embed: Content description, footer, banner and hex color."""
+    
+    embed_desc = discord.ui.TextInput(
+        label="Embed Description (Content)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Enter the main body of the embed here.",
+        required=True,
+        max_length=2000
+    )
+    
+    embed_footer = discord.ui.TextInput(
+        label="Embed Footer Text",
+        style=discord.TextStyle.short,
+        placeholder="Text at the very bottom (optional).",
+        required=False,
+        max_length=200
+    )
+    
+    embed_banner = discord.ui.TextInput(
+        label="Embed Bottom Banner Image URL",
+        style=discord.TextStyle.short,
+        placeholder="URL of bottom banner image (optional).",
+        required=False,
+        max_length=256
+    )
+    
+    embed_color = discord.ui.TextInput(
+        label="Embed Accent Hex Color",
+        style=discord.TextStyle.short,
+        placeholder="e.g. #5865F2 (default Blurple)",
+        default="#5865F2",
+        required=False,
+        max_length=7
+    )
+
+    def __init__(self, cog, channel: discord.TextChannel):
+        super().__init__()
+        self.cog = cog
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        p1 = self.cog.msg_temp_settings.get(user_id)
+        
+        if not p1:
+            await interaction.response.send_message(
+                "❌ Message setup session expired. Please run `/msg` again.",
+                ephemeral=True
+            )
+            return
+
+        # Clean up temp state
+        del self.cog.msg_temp_settings[user_id]
+
+        # Construct and send the message to the designated channel
+        parsed_color = parse_color(self.embed_color.value)
+        embed = discord.Embed(
+            title=p1["embed_title"] or None,
+            description=self.embed_desc.value or None,
+            color=parsed_color
+        )
+
+        if p1["embed_author_name"]:
+            embed.set_author(
+                name=p1["embed_author_name"],
+                icon_url=p1["embed_author_icon"] or None
+            )
+
+        if p1["embed_thumbnail"]:
+            embed.set_thumbnail(url=p1["embed_thumbnail"])
+
+        if self.embed_banner.value:
+            embed.set_image(url=self.embed_banner.value)
+
+        if self.embed_footer.value:
+            embed.set_footer(text=self.embed_footer.value)
+
+        try:
+            sent_msg = await self.channel.send(content=p1["normal_text"] or None, embed=embed)
+            await interaction.response.send_message(
+                f"✅ **Message successfully sent to {self.channel.mention}!**\n[View Sent Message]({sent_msg.jump_url})",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to send message to the channel: {e}", ephemeral=True)
+
 class Moderation(commands.Cog):
     """Cog containing moderator commands, automod rules, and activity logging."""
 
@@ -56,6 +263,62 @@ class Moderation(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.spam_cooldown = {} # (guild_id, user_id) -> list of timestamps
+        self.msg_temp_settings = {} # Stores user_id -> temp msg setup data
+        
+        # Create administration config subgroup: /config admin role
+        admin_group = app_commands.Group(name="admin", description="Configure administrative roles.")
+        
+        @admin_group.command(name="role", description="Manage authorized roles for the /msg command.")
+        @app_commands.describe(
+            action="Choose to add, remove or list roles.",
+            role="The role to add or remove (optional for list)."
+        )
+        @app_commands.choices(action=[
+            app_commands.Choice(name="add", value="add"),
+            app_commands.Choice(name="remove", value="remove"),
+            app_commands.Choice(name="list", value="list")
+        ])
+        async def config_admin_role(interaction: discord.Interaction, action: str, role: discord.Role = None):
+            if not interaction.guild:
+                return
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("❌ Only server administrators can configure admin roles.", ephemeral=True)
+                return
+                
+            if action == "add":
+                if not role:
+                    await interaction.response.send_message("❌ Please specify a role to add.", ephemeral=True)
+                    return
+                database.add_msg_role(interaction.guild_id, role.id)
+                await interaction.response.send_message(f"✅ Role {role.mention} is now authorized to use `/msg`.", ephemeral=True)
+                
+            elif action == "remove":
+                if not role:
+                    await interaction.response.send_message("❌ Please specify a role to remove.", ephemeral=True)
+                    return
+                database.remove_msg_role(interaction.guild_id, role.id)
+                await interaction.response.send_message(f"✅ Role {role.mention} has been removed from authorized `/msg` roles.", ephemeral=True)
+                
+            elif action == "list":
+                role_ids = database.get_msg_roles(interaction.guild_id)
+                if not role_ids:
+                    await interaction.response.send_message("ℹ️ No custom roles authorized for `/msg`. Only server administrators can use it.", ephemeral=True)
+                    return
+                
+                mentions = []
+                for r_id in role_ids:
+                    r = interaction.guild.get_role(r_id)
+                    if r:
+                        mentions.append(r.mention)
+                    else:
+                        database.remove_msg_role(interaction.guild_id, r_id)
+                
+                await interaction.response.send_message(
+                    f"🛡️ **Roles authorized for `/msg`:**\n" + "\n".join(mentions),
+                    ephemeral=True
+                )
+                
+        self.config_group.add_command(admin_group)
 
     # ==========================================
     # MODROLE MANAGEMENT (Admin Only)
@@ -460,6 +723,16 @@ class Moderation(commands.Cog):
             )
             
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="msg", description="Send a custom embedded message to a channel as the bot.")
+    @app_commands.describe(channel="Select the text channel where the message should be posted.")
+    async def msg_cmd(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await is_msg_allowed(interaction):
+            return
+        
+        # Open Part 1 modal
+        modal = MsgSetupModalPart1(self, channel, interaction.user)
+        await interaction.response.send_modal(modal)
 
     # ==========================================
     # AUTO-MODERATION ENGINE (Event Listener)
