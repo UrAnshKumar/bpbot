@@ -4,58 +4,155 @@ from discord.ext import commands
 import logging
 import asyncio
 import io
+import random
 import datetime
 from datetime import timedelta
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
 logger = logging.getLogger("pomodoro")
 
-FONT_PATH = "c:/Windows/Fonts/arialbd.ttf"
+# ─── Color Palette ────────────────────────────────────────────────────────────
+_BG_TOP    = (  6,   8,  22)          # Deep midnight navy
+_BG_BOT    = ( 12,  20,  52)          # Midnight blue
+FOCUS_CLR  = (255, 107, 107)          # Soft coral / red
+BREAK_CLR  = (107, 203, 119)          # Mint green
+GOLD       = (229, 169,  60)          # Warm gold accent
+TEXT_W     = (255, 255, 255, 255)     # Pure white
+TEXT_M     = (155, 178, 210, 255)     # Muted steel blue
+RING_TRACK = ( 22,  28,  55, 255)     # Dark ring base track
 
-def get_font(size: int) -> ImageFont.FreeTypeFont:
-    """Loads Arial Bold with the specified size, falling back to default if unavailable."""
-    try:
-        return ImageFont.truetype(FONT_PATH, size)
-    except IOError:
-        # Fallback to default
+# ─── Cross-Platform Font Loader ───────────────────────────────────────────────
+_BOLD_PATHS = [
+    "C:/Windows/Fonts/segoeuib.ttf",          # Windows – Segoe UI Bold
+    "C:/Windows/Fonts/calibrib.ttf",           # Windows – Calibri Bold
+    "C:/Windows/Fonts/arialbd.ttf",            # Windows – Arial Bold
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",          # Linux
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux alt
+]
+_REG_PATHS = [
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/calibri.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+]
+
+def _font(candidates: list, size: int) -> ImageFont.FreeTypeFont:
+    for path in candidates:
         try:
-            return ImageFont.load_default(size=size)
-        except TypeError:
-            return ImageFont.load_default()
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+def bold(size: int)    -> ImageFont.FreeTypeFont: return _font(_BOLD_PATHS, size)
+def regular(size: int) -> ImageFont.FreeTypeFont: return _font(_REG_PATHS, size)
+
+
+# ─── Background Helpers ───────────────────────────────────────────────────────
+
+def make_gradient_bg(W: int, H: int) -> Image.Image:
+    """Deep-space gradient canvas with soft glow orbs and micro star dots."""
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 255))
+    draw   = ImageDraw.Draw(canvas)
+
+    # Vertical gradient top → bottom
+    for y in range(H):
+        t = y / H
+        r = int(_BG_TOP[0] + (_BG_BOT[0] - _BG_TOP[0]) * t)
+        g = int(_BG_TOP[1] + (_BG_BOT[1] - _BG_TOP[1]) * t)
+        b = int(_BG_TOP[2] + (_BG_BOT[2] - _BG_TOP[2]) * t)
+        draw.line([(0, y), (W, y)], fill=(r, g, b, 255))
+
+    # Soft purple glow orb — top-left
+    g1 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(g1).ellipse((-110, -110, 460, 400), fill=(90, 38, 195, 60))
+    g1 = g1.filter(ImageFilter.GaussianBlur(radius=95))
+    canvas = Image.alpha_composite(canvas, g1)
+
+    # Soft teal glow orb — top-right
+    g2 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(g2).ellipse((W - 400, -90, W + 80, 380), fill=(18, 88, 170, 52))
+    g2 = g2.filter(ImageFilter.GaussianBlur(radius=95))
+    canvas = Image.alpha_composite(canvas, g2)
+
+    # Warm amber micro-glow bottom-center (adds depth)
+    g3 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(g3).ellipse((W // 2 - 200, H - 200, W // 2 + 200, H + 100), fill=(180, 100, 30, 35))
+    g3 = g3.filter(ImageFilter.GaussianBlur(radius=70))
+    canvas = Image.alpha_composite(canvas, g3)
+
+    # Micro star dots (fixed seed = stable pattern across refreshes)
+    stars = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd    = ImageDraw.Draw(stars)
+    rng   = random.Random(7331)
+    for _ in range(110):
+        x = rng.randint(0, W)
+        y = rng.randint(0, H)
+        r = rng.choice([1, 1, 1, 2])
+        a = rng.randint(35, 130)
+        sd.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255, a))
+    canvas = Image.alpha_composite(canvas, stars)
+
+    return canvas
+
+
+def draw_glass_panel(canvas: Image.Image, x1, y1, x2, y2, radius: int = 14) -> Image.Image:
+    """Frosted-glass panel with a thin luminous border."""
+    ov = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    d  = ImageDraw.Draw(ov)
+    d.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=(255, 255, 255, 8))
+    d.rounded_rectangle([x1, y1, x2, y2], radius=radius, outline=(255, 255, 255, 32), width=1)
+    return Image.alpha_composite(canvas, ov)
+
+
+def draw_glowing_arc(canvas: Image.Image, box, start, end, color) -> Image.Image:
+    """Draws an arc with a layered soft outer glow."""
+    W, H = canvas.size
+    for width, alpha in [(44, 14), (30, 28), (18, 255)]:
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).arc(box, start=start, end=end,
+                                   fill=(*color, alpha), width=width)
+        canvas = Image.alpha_composite(canvas, layer)
+    return canvas
+
+
+# ─── Avatar Helpers ───────────────────────────────────────────────────────────
 
 async def fetch_avatar(user: discord.Member) -> Image.Image:
-    """Fetches a member's avatar and returns it as a PIL image. Falls back to a grey circle on failure."""
-    avatar_url = user.display_avatar.url
+    """Fetches member avatar as PIL image. Falls back to a gold circle."""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(str(avatar_url)) as response:
-                if response.status == 200:
-                    data = await response.read()
+            async with session.get(str(user.display_avatar.url)) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
                     return Image.open(io.BytesIO(data)).convert("RGBA")
     except Exception as e:
-        logger.warning(f"Failed to fetch avatar for {user}: {e}")
-    
-    # Generate a fallback avatar image
-    img = Image.new("RGBA", (100, 100), color=(15, 30, 40, 255))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse([(10, 10), (90, 90)], fill=(229, 169, 60, 255)) # Gold color circle
+        logger.warning(f"Avatar fetch failed for {user}: {e}")
+    img = Image.new("RGBA", (100, 100), (14, 22, 48, 255))
+    ImageDraw.Draw(img).ellipse([(5, 5), (95, 95)], fill=(*GOLD, 255))
     return img
 
-def crop_circle(img: Image.Image, size: int) -> Image.Image:
-    """Crops an image into a circle with transparency."""
-    img = img.resize((size, size), Image.Resampling.LANCZOS)
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((0, 0, size, size), fill=255)
-    output = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
-    output.putalpha(mask)
-    return output
 
+def crop_circle(img: Image.Image, size: int) -> Image.Image:
+    """Returns the image cropped into a perfect circle with transparency."""
+    img  = img.resize((size, size), Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    out  = ImageOps.fit(img, (size, size), centering=(0.5, 0.5))
+    out.putalpha(mask)
+    return out
+
+
+# ─── Session Class ────────────────────────────────────────────────────────────
 
 class PomodoroSession:
-    """Main object representing an active Pomodoro session in a voice channel."""
-    
+    """Represents an active Pomodoro study session running inside a voice channel."""
+
     def __init__(
         self,
         cog,
@@ -66,33 +163,31 @@ class PomodoroSession:
         break_length: int,
         name: str,
         video_required: bool,
-        inactive_threshold: int
+        inactive_threshold: int,
     ):
-        self.cog = cog
-        self.voice_channel = voice_channel
-        self.timer_channel = timer_channel
+        self.cog                  = cog
+        self.voice_channel        = voice_channel
+        self.timer_channel        = timer_channel
         self.notification_channel = notification_channel
-        
-        # Core durations in seconds
-        self.focus_length = focus_length * 60
-        self.break_length = break_length * 60
-        self.name = name
-        self.video_required = video_required
+
+        self.focus_length      = focus_length * 60
+        self.break_length      = break_length * 60
+        self.name              = name
+        self.video_required    = video_required
         self.inactive_threshold = inactive_threshold * 60
-        
-        self.current_phase = "FOCUS"
-        self.phase_start_time = datetime.datetime.now()
-        self.phase_end_time = self.phase_start_time + timedelta(seconds=self.focus_length)
-        
-        self.message = None # Discord message carrying the timer card
-        self.active = True
-        
-        # User tracking dictionaries
-        self.join_times = {} # user_id -> datetime of VC join
-        self.inactive_times = {} # user_id -> datetime when camera disabled
-        self.warned_users = set() # user_ids warned for video inactivity
-        
-        # Initialize join times for members already in the VC
+
+        self.current_phase  = "FOCUS"
+        self.phase_start    = datetime.datetime.now()
+        self.phase_end      = self.phase_start + timedelta(seconds=self.focus_length)
+
+        self.message        = None   # Discord message showing the timer card
+        self.active         = True
+
+        # Tracking dictionaries
+        self.join_times     = {}     # user_id → join datetime
+        self.inactive_times = {}     # user_id → camera-off datetime
+        self.warned_users   = set()  # user_ids that received a warning DM
+
         now = datetime.datetime.now()
         for member in voice_channel.members:
             if not member.bot:
@@ -100,262 +195,322 @@ class PomodoroSession:
                 if self.video_required and not member.voice.self_video:
                     self.inactive_times[member.id] = now
 
-        # Start the update task loop
         self.task = asyncio.create_task(self.update_loop())
 
+    # ── Update Loop ───────────────────────────────────────────────────────────
+
     async def update_loop(self):
-        """Asynchronous update loop ticking every 30 seconds to refresh card and warn/kick inactive users."""
-        await asyncio.sleep(5) # Let initial command response send first
-        
+        """Tick every 30 s: refresh the card and enforce camera rules."""
+        await asyncio.sleep(5)
+
         while self.active:
             try:
-                now = datetime.datetime.now()
-                remaining = int((self.phase_end_time - now).total_seconds())
-                
-                # Check for Phase Transition
+                now       = datetime.datetime.now()
+                remaining = int((self.phase_end - now).total_seconds())
+
+                # Phase transition
                 if remaining <= 0:
                     if self.current_phase == "FOCUS":
                         self.current_phase = "BREAK"
-                        self.phase_end_time = now + timedelta(seconds=self.break_length)
+                        self.phase_end     = now + timedelta(seconds=self.break_length)
                         try:
                             await self.notification_channel.send(
-                                f"🔔 **{self.name}** Focus session finished! Time for a **{self.break_length // 60} minutes** break. 🟢"
+                                f"🔔 **{self.name}** — Focus done! "
+                                f"Enjoy your **{self.break_length // 60}m** break. 🟢"
                             )
                         except Exception:
                             pass
                     else:
                         self.current_phase = "FOCUS"
-                        self.phase_end_time = now + timedelta(seconds=self.focus_length)
+                        self.phase_end     = now + timedelta(seconds=self.focus_length)
                         try:
                             await self.notification_channel.send(
-                                f"🔴 **{self.name}** Break session finished! Back to focus for **{self.focus_length // 60} minutes**. 🚀"
+                                f"🔴 **{self.name}** — Break over! "
+                                f"Back to focus for **{self.focus_length // 60}m**. 🚀"
                             )
                         except Exception:
                             pass
-                            
-                    self.phase_start_time = now
-                    remaining = int((self.phase_end_time - now).total_seconds())
+                    self.phase_start = now
+                    remaining        = int((self.phase_end - now).total_seconds())
 
-                # Clean tracking for members who left VC
-                current_member_ids = {m.id for m in self.voice_channel.members if not m.bot}
-                for uid in list(self.join_times.keys()):
-                    if uid not in current_member_ids:
+                # Clean up members who left VC
+                current_ids = {m.id for m in self.voice_channel.members if not m.bot}
+                for uid in list(self.join_times):
+                    if uid not in current_ids:
                         self.join_times.pop(uid, None)
                         self.inactive_times.pop(uid, None)
                         self.warned_users.discard(uid)
 
-                # Track and check camera state (enforce camera rule)
+                # Camera enforcement
                 for member in self.voice_channel.members:
                     if member.bot:
                         continue
-                        
-                    # Maintain join times if missed
                     if member.id not in self.join_times:
                         self.join_times[member.id] = now
-
                     if self.video_required:
                         has_video = member.voice and member.voice.self_video
                         if not has_video:
                             if member.id not in self.inactive_times:
                                 self.inactive_times[member.id] = now
                             else:
-                                inactive_duration = int((now - self.inactive_times[member.id]).total_seconds())
-                                
-                                # Kick if inactive threshold exceeded
-                                if inactive_duration >= self.inactive_threshold:
+                                idle = int((now - self.inactive_times[member.id]).total_seconds())
+                                if idle >= self.inactive_threshold:
                                     try:
-                                        await member.move_to(None, reason="Pomodoro video stream enforcement failed")
+                                        await member.move_to(None, reason="Pomodoro camera enforcement")
                                         self.inactive_times.pop(member.id, None)
                                         self.join_times.pop(member.id, None)
                                         self.warned_users.discard(member.id)
-                                        
-                                        # Send DM notification
                                         embed = discord.Embed(
-                                            title="❌ Disconnected from voice",
+                                            title="❌ Disconnected from Voice",
                                             description=(
-                                                f"You were disconnected from the voice channel **{self.voice_channel.name}** because "
-                                                f"your camera was off for more than {self.inactive_threshold // 60} minutes during study session."
+                                                f"You were removed from **{self.voice_channel.name}** "
+                                                f"because your camera was off for more than "
+                                                f"{self.inactive_threshold // 60} minutes."
                                             ),
-                                            color=discord.Color.red()
+                                            color=discord.Color.red(),
                                         )
                                         await member.send(embed=embed)
                                     except Exception as e:
-                                        logger.error(f"Failed to kick spam/inactive member {member.name}: {e}")
-                                
-                                # DM Warning at half threshold time
-                                elif inactive_duration >= (self.inactive_threshold / 2):
+                                        logger.error(f"Kick failed for {member}: {e}")
+                                elif idle >= (self.inactive_threshold / 2):
                                     if member.id not in self.warned_users:
                                         try:
-                                            remaining_warn = (self.inactive_threshold - inactive_duration) // 60
+                                            mins_left = (self.inactive_threshold - idle) // 60
                                             embed = discord.Embed(
                                                 title="⚠️ Camera Off Warning",
                                                 description=(
                                                     f"Your camera is off in **{self.voice_channel.name}**. "
-                                                    f"Please turn it on within **{remaining_warn} minutes** or you will be kicked from the voice channel."
+                                                    f"Turn it on within **{mins_left}m** to avoid being kicked."
                                                 ),
-                                                color=discord.Color.gold()
+                                                color=discord.Color.gold(),
                                             )
                                             await member.send(embed=embed)
                                             self.warned_users.add(member.id)
                                         except Exception:
                                             pass
                         else:
-                            # User has video on, clear trackings
                             self.inactive_times.pop(member.id, None)
                             self.warned_users.discard(member.id)
 
-                # Generate Pillow Timer Card image
-                file = await self.generate_card_file(remaining)
-                
+                # Render and post the updated card
+                file  = await self.generate_card_file(remaining)
                 embed = discord.Embed(
                     title=f"⏳ Active Study Timer: {self.name}",
-                    description=f"Active in: {self.voice_channel.mention} | Focus: {self.focus_length//60}m | Break: {self.break_length//60}m",
-                    color=discord.Color.gold() if self.current_phase == "FOCUS" else discord.Color.green()
+                    description=(
+                        f"Active in: {self.voice_channel.mention} | "
+                        f"Focus: {self.focus_length // 60}m | Break: {self.break_length // 60}m"
+                    ),
+                    color=discord.Color.gold() if self.current_phase == "FOCUS" else discord.Color.green(),
                 )
                 embed.set_image(url="attachment://timer.png")
-                
-                # Edit status message
+
                 if self.message:
                     try:
                         await self.message.edit(embed=embed, attachments=[file])
                     except Exception as e:
-                        logger.error(f"Failed to edit pomodoro message card: {e}")
-                        
+                        logger.error(f"Failed to refresh timer card: {e}")
+
             except Exception as e:
                 logger.error(f"Error in Pomodoro update loop: {e}")
-                
-            await asyncio.sleep(30) # Refresh every 30 seconds
+
+            await asyncio.sleep(30)
+
+    # ── Card Renderer ─────────────────────────────────────────────────────────
 
     async def generate_card_file(self, remaining_seconds: int) -> discord.File:
-        """Generates the aesthetic PIL study card and returns it as a discord.File attachment."""
-        # Create blank canvas: 1120x620 dark navy
-        canvas = Image.new("RGBA", (1120, 620), color=(13, 25, 33, 255))
+        """Renders the aesthetic deep-space Pomodoro study card as a PNG attachment."""
+        W, H = 1120, 560
+
+        # ── Background ────────────────────────────────────────────────────────
+        canvas = make_gradient_bg(W, H)
+
+        # ── Left Frosted-Glass Panel (study group) ────────────────────────────
+        PX1, PY1, PX2, PY2 = 24, 24, 480, H - 24
+        canvas = draw_glass_panel(canvas, PX1, PY1, PX2, PY2)
+
         draw = ImageDraw.Draw(canvas)
-        
-        # Load fonts
-        font_title = get_font(38)
-        font_timer = get_font(100)
-        font_header_bold = get_font(26)
-        font_label = get_font(24)
-        font_sub = get_font(18)
-        
-        # Draw Header Bar (Dark slate blue banner)
-        draw.rectangle([(0, 0), (1120, 85)], fill=(15, 30, 40, 255))
-        
-        # Render Session Title in header
-        draw.text((35, 18), self.name.upper(), font=font_title, fill=(255, 255, 255, 255))
-        
-        # Draw Status Badge on the right side of header banner
-        badge_text = "FOCUS PHASE" if self.current_phase == "FOCUS" else "BREAK TIME"
-        badge_color = (255, 92, 92, 255) if self.current_phase == "FOCUS" else (92, 255, 92, 255)
-        # Rounded rect for badge
-        draw.rounded_rectangle([(920, 18), (1085, 67)], radius=8, fill=badge_color)
-        # Center badge text
-        bbox = draw.textbbox((0, 0), badge_text, font=font_sub)
-        bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        bx = 920 + (165 - bw) // 2
-        by = 18 + (49 - bh) // 2
-        draw.text((bx, by), badge_text, font=font_sub, fill=(0, 0, 0, 255) if self.current_phase == "BREAK" else (255, 255, 255, 255))
-        
-        # Draw Study Group section (Left column)
-        draw.text((35, 115), "STUDY GROUP", font=font_header_bold, fill=(229, 169, 60, 255)) # Gold color
-        
-        # List VC Members
-        y_pos = 165
+
+        # ── Fonts ─────────────────────────────────────────────────────────────
+        f_sess   = bold(26)
+        f_glabel = bold(11)
+        f_user   = bold(19)
+        f_sub    = regular(13)
+        f_cam    = regular(12)
+        f_timer  = bold(70)
+        f_remain = regular(14)
+        f_badge  = bold(12)
+        f_stats  = regular(15)
+
+        # ── Session Title ─────────────────────────────────────────────────────
+        draw.text((PX1 + 22, PY1 + 20), self.name.upper(), font=f_sess, fill=TEXT_W)
+
+        # Thin gold separator under title
+        draw.line(
+            [(PX1 + 22, PY1 + 66), (PX2 - 22, PY1 + 66)],
+            fill=(*GOLD, 140), width=1
+        )
+
+        # "● STUDY GROUP" section label
+        draw.text((PX1 + 22, PY1 + 80), "● STUDY GROUP", font=f_glabel, fill=(*GOLD, 215))
+
+        # ── Members ───────────────────────────────────────────────────────────
+        now     = datetime.datetime.now()
         members = [m for m in self.voice_channel.members if not m.bot]
-        
-        # Sort by join time
-        members.sort(key=lambda m: self.join_times.get(m.id, datetime.datetime.now()))
-        
-        # Draw up to 5 members
-        now = datetime.datetime.now()
-        for idx, member in enumerate(members[:5]):
-            # Fetch avatar and crop circular
-            pfp = await fetch_avatar(member)
-            circle_pfp = crop_circle(pfp, 64)
-            canvas.alpha_composite(circle_pfp, (35, y_pos))
-            
+        members.sort(key=lambda m: self.join_times.get(m.id, now))
+
+        y_cur = PY1 + 114
+        for member in members[:5]:
+            # Avatar
+            pfp        = await fetch_avatar(member)
+            pfp_circle = crop_circle(pfp, 50)
+            canvas.alpha_composite(pfp_circle, (PX1 + 22, y_cur))
+
+            # Gold ring around avatar
+            draw = ImageDraw.Draw(canvas)
+            draw.ellipse(
+                [PX1 + 21, y_cur - 1, PX1 + 72, y_cur + 51],
+                outline=(*GOLD, 110), width=2
+            )
+
             # Username
-            username = member.display_name
-            draw.text((115, y_pos + 6), username, font=font_label, fill=(255, 255, 255, 255))
-            
-            # Joined duration
-            join_time = self.join_times.get(member.id, now)
-            duration_mins = int((now - join_time).total_seconds() // 60)
-            duration_str = f"Joined {duration_mins}m ago" if duration_mins > 0 else "Joined just now"
-            
-            # Check camera state for display icon indicator
-            cam_str = ""
+            draw.text((PX1 + 86, y_cur + 5), member.display_name, font=f_user, fill=TEXT_W)
+
+            # Duration since joined
+            join_dt  = self.join_times.get(member.id, now)
+            mins_in  = int((now - join_dt).total_seconds() // 60)
+            dur_str  = f"Studying for {mins_in}m" if mins_in > 0 else "Just joined"
+            draw.text((PX1 + 86, y_cur + 29), dur_str, font=f_sub, fill=TEXT_M)
+
+            # Camera status badge
             if self.video_required:
-                cam_str = " | [CAM ON]" if member.voice.self_video else " | [CAM OFF]"
-                
-            draw.text((115, y_pos + 36), f"{duration_str}{cam_str}", font=font_sub, fill=(176, 196, 222, 255))
-            
-            y_pos += 80
+                cam_on  = member.voice and member.voice.self_video
+                cam_clr = BREAK_CLR if cam_on else FOCUS_CLR
+                cam_lbl = "CAM ON" if cam_on else "CAM OFF"
+                cb      = draw.textbbox((0, 0), cam_lbl, font=f_cam)
+                c_w     = cb[2] - cb[0] + 16
+                c_x     = PX2 - c_w - 16
+                c_y     = y_cur + 27
+                draw.rounded_rectangle(
+                    [c_x, c_y, c_x + c_w, c_y + 18],
+                    radius=4, fill=(*cam_clr, 30)
+                )
+                draw.rounded_rectangle(
+                    [c_x, c_y, c_x + c_w, c_y + 18],
+                    radius=4, outline=(*cam_clr, 110), width=1
+                )
+                draw.text((c_x + 8, c_y + 2), cam_lbl, font=f_cam, fill=(*cam_clr, 255))
 
-        # Display offset if more than 5 members are present
-        if len(members) > 5:
-            draw.text((35, y_pos + 10), f"+ {len(members) - 5} more participants", font=font_sub, fill=(229, 169, 60, 255))
+            y_cur += 80
 
-        # --- Draw Aesthetic Ring Timer (Right column) ---
-        RING_CX = 830
-        RING_CY = 350
-        RING_R = 170
-        
-        # Define bounding box
-        ring_box = [(RING_CX - RING_R, RING_CY - RING_R), (RING_CX + RING_R, RING_CY + RING_R)]
-        
-        # Background arc circle (dark slate blue)
-        draw.arc(ring_box, start=0, end=360, fill=(35, 45, 55, 255), width=22)
-        
-        # Calculate ratio of remaining time
-        total = self.focus_length if self.current_phase == "FOCUS" else self.break_length
-        ratio = max(0.0, min(1.0, remaining_seconds / total))
-        
-        # Progress Arc
-        start_angle = -90
-        end_angle = -90 + int(360 * ratio)
-        draw.arc(ring_box, start=start_angle, end=end_angle, fill=badge_color, width=22)
-        
-        # Format remaining time
-        rem_min = remaining_seconds // 60
-        rem_sec = remaining_seconds % 60
+        if not members:
+            draw.text((PX1 + 22, y_cur + 6), "No members in voice channel", font=f_sub, fill=TEXT_M)
+        elif len(members) > 5:
+            draw.text(
+                (PX1 + 22, y_cur + 6),
+                f"+ {len(members) - 5} more participants",
+                font=f_sub, fill=(*GOLD, 170)
+            )
+
+        # ── Right Side: Phase Badge ───────────────────────────────────────────
+        RING_CX, RING_CY, RING_R = 822, 286, 150
+        arc_clr = FOCUS_CLR if self.current_phase == "FOCUS" else BREAK_CLR
+
+        badge_txt = "● FOCUS PHASE" if self.current_phase == "FOCUS" else "● BREAK TIME"
+        b_bb  = draw.textbbox((0, 0), badge_txt, font=f_badge)
+        b_w   = b_bb[2] - b_bb[0] + 32
+        b_h   = 28
+        b_x   = RING_CX - b_w // 2
+        b_y   = 26
+        draw.rounded_rectangle([b_x, b_y, b_x + b_w, b_y + b_h], radius=14, fill=(*arc_clr, 25))
+        draw.rounded_rectangle([b_x, b_y, b_x + b_w, b_y + b_h], radius=14, outline=(*arc_clr, 105), width=1)
+        draw.text((b_x + 16, b_y + 6), badge_txt, font=f_badge, fill=(*arc_clr, 255))
+
+        # ── Ring Track ────────────────────────────────────────────────────────
+        ring_box = [
+            (RING_CX - RING_R, RING_CY - RING_R),
+            (RING_CX + RING_R, RING_CY + RING_R),
+        ]
+        draw.arc(ring_box, start=0, end=360, fill=RING_TRACK, width=16)
+
+        # Subtle inner shadow ring
+        inner_box = [
+            (RING_CX - RING_R + 8, RING_CY - RING_R + 8),
+            (RING_CX + RING_R - 8, RING_CY + RING_R - 8),
+        ]
+        draw.arc(inner_box, start=0, end=360, fill=(255, 255, 255, 5), width=1)
+
+        # ── Progress Arc with Glow ────────────────────────────────────────────
+        total     = self.focus_length if self.current_phase == "FOCUS" else self.break_length
+        ratio     = max(0.02, min(1.0, remaining_seconds / total))
+        arc_start = -90
+        arc_end   = arc_start + int(360 * ratio)
+        canvas    = draw_glowing_arc(canvas, ring_box, arc_start, arc_end, arc_clr)
+        draw      = ImageDraw.Draw(canvas)   # refresh draw after alpha compositing
+
+        # ── Timer Digits (anti-overlap math) ─────────────────────────────────
+        rem_min  = max(0, remaining_seconds // 60)
+        rem_sec  = max(0, remaining_seconds % 60)
         time_str = f"{rem_min:02}:{rem_sec:02}"
-        
-        # Center remaining clock digits inside the ring
-        bbox = draw.textbbox((0, 0), time_str, font=font_timer)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        tx = RING_CX - tw // 2
-        ty = RING_CY - th // 2 - 15
-        draw.text((tx, ty), time_str, font=font_timer, fill=(255, 255, 255, 255))
-        
-        # Phase Sub-title below clock digits
-        phase_sub = "REMAINING"
-        bbox = draw.textbbox((0, 0), phase_sub, font=font_sub)
-        sw, sh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        sx = RING_CX - sw // 2
-        sy = RING_CY + th // 2 + 5
-        draw.text((sx, sy), phase_sub, font=font_sub, fill=(176, 196, 222, 255))
-        
-        # Save to buffer
+
+        # Measure the true visual bounding box of the timer text
+        t_bb    = draw.textbbox((0, 0), time_str, font=f_timer)
+        t_w     = t_bb[2] - t_bb[0]   # visual width
+        t_h     = t_bb[3] - t_bb[1]   # visual height
+
+        # Desired visual center of the time digits: 16px ABOVE ring center
+        v_cx = RING_CX
+        v_cy = RING_CY - 18
+
+        # draw.text anchor point: shift by bbox offsets so the VISUAL center hits (v_cx, v_cy)
+        t_x = v_cx - t_bb[0] - t_w // 2
+        t_y = v_cy - t_bb[1] - t_h // 2
+        draw.text((t_x, t_y), time_str, font=f_timer, fill=TEXT_W)
+
+        # Visual bottom of the drawn text
+        timer_visual_bottom = t_y + t_bb[1] + t_h
+
+        # ── "REMAINING" Label — always below, never overlapping ───────────────
+        r_bb  = draw.textbbox((0, 0), "REMAINING", font=f_remain)
+        r_w   = r_bb[2] - r_bb[0]
+        r_x   = RING_CX - r_bb[0] - r_w // 2
+        r_y   = timer_visual_bottom + 10   # 10px clear gap below time digits
+        draw.text((r_x, r_y), "REMAINING", font=f_remain, fill=TEXT_M)
+
+        # ── Stats Strip (bottom-right) ────────────────────────────────────────
+        strip_y = H - 52
+        draw.line([(512, strip_y - 10), (W - 28, strip_y - 10)], fill=(255, 255, 255, 16), width=1)
+
+        stats = [
+            f"⏱  Focus: {self.focus_length  // 60}m",
+            f"☕  Break: {self.break_length  // 60}m",
+            f"👥  {len(members)} member{'s' if len(members) != 1 else ''}",
+        ]
+        sx = 516
+        for stat in stats:
+            s_bb = draw.textbbox((0, 0), stat, font=f_stats)
+            draw.text((sx, strip_y), stat, font=f_stats, fill=TEXT_M)
+            sx += (s_bb[2] - s_bb[0]) + 44
+
+        # ── Save ──────────────────────────────────────────────────────────────
         fp = io.BytesIO()
         canvas.save(fp, format="PNG")
         fp.seek(0)
-        
         return discord.File(fp, filename="timer.png")
 
     def stop(self):
-        """Cancels updates and stops the Pomodoro session."""
+        """Cancels the update loop and marks the session as inactive."""
         self.active = False
         self.task.cancel()
 
 
+# ─── Pomodoro Cog ─────────────────────────────────────────────────────────────
+
 class Pomodoro(commands.Cog):
     """Cog running pomodoro timers and camera requirements per voice channel."""
-    
+
     def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.sessions = {} # voice_channel_id -> PomodoroSession
+        self.bot      = bot
+        self.sessions = {}   # voice_channel_id → PomodoroSession
 
     @app_commands.command(name="pomodoro", description="Start a Pomodoro study session in your voice channel.")
     @app_commands.describe(
@@ -378,37 +533,33 @@ class Pomodoro(commands.Cog):
         video_required: bool,
         inactive_threshold: int
     ):
-        # Enforce command check: only allowed in server VC
         if not interaction.guild:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-        # Check if caller is in voice channel
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message("❌ You must be connected to a voice channel to start a Pomodoro session!", ephemeral=True)
-            return
-
-        voice_channel = interaction.user.voice.channel
-        
-        # Validate selected channels are text-writable
-        # Voice channels and Text channels both support interaction/sending messages in discord.py v2
-        if not isinstance(timer_channel, (discord.TextChannel, discord.VoiceChannel)) or \
-           not isinstance(notification_channel, (discord.TextChannel, discord.VoiceChannel)):
-            await interaction.response.send_message("❌ The selected timer and notification channels must support message postings.", ephemeral=True)
-            return
-
-        # Check for existing session in this voice channel
-        if voice_channel.id in self.sessions:
             await interaction.response.send_message(
-                f"❌ A Pomodoro session is already active in **{voice_channel.name}**.",
-                ephemeral=True
+                "❌ You must be connected to a voice channel to start a Pomodoro session!", ephemeral=True
             )
             return
 
-        # Defer response as rendering/database setup takes a split second
+        voice_channel = interaction.user.voice.channel
+
+        if not isinstance(timer_channel, (discord.TextChannel, discord.VoiceChannel)) or \
+           not isinstance(notification_channel, (discord.TextChannel, discord.VoiceChannel)):
+            await interaction.response.send_message(
+                "❌ The selected timer and notification channels must support message posting.", ephemeral=True
+            )
+            return
+
+        if voice_channel.id in self.sessions:
+            await interaction.response.send_message(
+                f"❌ A Pomodoro session is already active in **{voice_channel.name}**.", ephemeral=True
+            )
+            return
+
         await interaction.response.defer(ephemeral=False)
 
-        # Create session
         session = PomodoroSession(
             cog=self,
             voice_channel=voice_channel,
@@ -418,39 +569,34 @@ class Pomodoro(commands.Cog):
             break_length=break_length,
             name=name,
             video_required=video_required,
-            inactive_threshold=inactive_threshold
+            inactive_threshold=inactive_threshold,
         )
         self.sessions[voice_channel.id] = session
 
-        # Generate initial status card
-        file = await session.generate_card_file(focus_length * 60)
-        
+        file  = await session.generate_card_file(focus_length * 60)
         embed = discord.Embed(
             title=f"⏳ Active Study Timer: {session.name}",
             description=f"Active in: {voice_channel.mention} | Focus: {focus_length}m | Break: {break_length}m",
-            color=discord.Color.gold()
+            color=discord.Color.gold(),
         )
         embed.set_image(url="attachment://timer.png")
 
         try:
-            # Post initial card and save the message object
             msg = await timer_channel.send(embed=embed, file=file)
             session.message = msg
-            
-            # Send initial focus notification
+
             await notification_channel.send(
-                f"🔴 **Focus session started for {voice_channel.mention}!** Back to focus for **{focus_length} minutes**. 🚀"
+                f"🔴 **Focus session started for {voice_channel.mention}!** "
+                f"Back to focus for **{focus_length} minutes**. 🚀"
             )
-            
-            # Update caller
             await interaction.followup.send(
                 f"✅ **Pomodoro session successfully started!**\n"
                 f"• **Voice Room:** {voice_channel.mention}\n"
                 f"• **Timer updates in:** {timer_channel.mention}\n"
-                f"• **Camera Check:** {'Enabled' if video_required else 'Disabled'} (Threshold: {inactive_threshold}m)"
+                f"• **Camera Check:** {'Enabled' if video_required else 'Disabled'} "
+                f"(Threshold: {inactive_threshold}m)"
             )
         except Exception as e:
-            # Cleanup on failure
             session.stop()
             self.sessions.pop(voice_channel.id, None)
             await interaction.followup.send(f"❌ Failed to start session: {e}")
@@ -462,83 +608,96 @@ class Pomodoro(commands.Cog):
             return
 
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message("❌ You must be connected to a voice channel to check the timer.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ You must be connected to a voice channel to check the timer.", ephemeral=True
+            )
             return
 
-        vc_id = interaction.user.voice.channel.id
+        vc_id   = interaction.user.voice.channel.id
         session = self.sessions.get(vc_id)
-        
+
         if not session:
-            await interaction.response.send_message("❌ No active Pomodoro session was found in your voice channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ No active Pomodoro session was found in your voice channel.", ephemeral=True
+            )
             return
 
-        now = datetime.datetime.now()
-        remaining = int((session.phase_end_time - now).total_seconds())
+        now     = datetime.datetime.now()
+        remaining = int((session.phase_end - now).total_seconds())
         rem_min = max(0, remaining // 60)
         rem_sec = max(0, remaining % 60)
 
         embed = discord.Embed(
             title=f"⏱️ Study Status — {session.name}",
             description=f"**VC Room:** {interaction.user.voice.channel.mention}",
-            color=discord.Color.gold() if session.current_phase == "FOCUS" else discord.Color.green()
+            color=discord.Color.gold() if session.current_phase == "FOCUS" else discord.Color.green(),
         )
-        embed.add_field(name="Current Phase", value=f"🔴 **{session.current_phase}**", inline=True)
-        embed.add_field(name="Remaining Time", value=f"⏳ **{rem_min:02}:{rem_sec:02}**", inline=True)
-        embed.add_field(name="Enforce Camera", value="✅ Yes" if session.video_required else "❌ No", inline=True)
-        
+        embed.add_field(name="Current Phase",  value=f"🔴 **{session.current_phase}**",     inline=True)
+        embed.add_field(name="Remaining Time", value=f"⏳ **{rem_min:02}:{rem_sec:02}**",   inline=True)
+        embed.add_field(name="Camera Check",   value="✅ Yes" if session.video_required else "❌ No", inline=True)
+
         if session.message:
-            embed.add_field(name="Timer Dashboard", value=f"[Jump to Dashboard]({session.message.jump_url})", inline=False)
-            
+            embed.add_field(
+                name="Timer Dashboard",
+                value=f"[Jump to Dashboard]({session.message.jump_url})",
+                inline=False,
+            )
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        """Listener handling automatic join/leave updates and camera toggles."""
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        """Keeps session tracking in sync when members join, leave, or toggle camera."""
         if member.bot:
             return
 
         now = datetime.datetime.now()
-        
-        # Member changed voice channel
+
         if before.channel != after.channel:
-            # Left a voice channel
+            # Left a channel
             if before.channel and before.channel.id in self.sessions:
                 session = self.sessions[before.channel.id]
                 session.join_times.pop(member.id, None)
                 session.inactive_times.pop(member.id, None)
                 session.warned_users.discard(member.id)
-                
-                # If voice channel becomes completely empty, stop and cleanup session
-                non_bot_members = [m for m in before.channel.members if not m.bot]
-                if not non_bot_members:
+
+                non_bots = [m for m in before.channel.members if not m.bot]
+                if not non_bots:
                     session.stop()
                     self.sessions.pop(before.channel.id, None)
                     try:
                         await session.notification_channel.send(
-                            f"ℹ️ Pomodoro session in **{before.channel.name}** has ended because the channel became empty."
+                            f"ℹ️ Pomodoro session in **{before.channel.name}** ended — channel is now empty."
                         )
                     except Exception:
                         pass
 
-            # Joined a voice channel
+            # Joined a channel
             if after.channel and after.channel.id in self.sessions:
                 session = self.sessions[after.channel.id]
                 session.join_times[member.id] = now
                 if session.video_required and not after.self_video:
                     session.inactive_times[member.id] = now
 
-        # Member toggled camera stream in same channel
-        elif before.channel == after.channel and after.channel and after.channel.id in self.sessions:
+        # Camera toggled in the same channel
+        elif (
+            before.channel == after.channel
+            and after.channel
+            and after.channel.id in self.sessions
+        ):
             session = self.sessions[after.channel.id]
-            if session.video_required:
-                if before.self_video != after.self_video:
-                    if not after.self_video:
-                        # Video turned off
-                        session.inactive_times[member.id] = now
-                    else:
-                        # Video turned on
-                        session.inactive_times.pop(member.id, None)
-                        session.warned_users.discard(member.id)
+            if session.video_required and before.self_video != after.self_video:
+                if not after.self_video:
+                    session.inactive_times[member.id] = now
+                else:
+                    session.inactive_times.pop(member.id, None)
+                    session.warned_users.discard(member.id)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Pomodoro(bot))
