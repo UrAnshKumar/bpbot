@@ -36,14 +36,16 @@ class Leaderboard(commands.Cog):
         await interaction.response.defer()
 
         try:
-            # Fetch top users from DB
-            top_users = database.get_top_users(interaction.guild_id, limit=10)
+            # Fetch all top users from DB
+            top_users = database.get_top_users(interaction.guild_id, limit=100)
             
             if not top_users:
                 await interaction.followup.send("No users are on the leaderboard yet!")
                 return
-
-            file = await self.generate_leaderboard_card(interaction.guild, top_users)
+            
+            total_pages = max(1, math.ceil(len(top_users) / 10))
+            
+            file = await self.generate_leaderboard_card(interaction.guild, top_users, 1)
             
             embed = discord.Embed(
                 title=f"🏆 {interaction.guild.name} Leaderboard",
@@ -52,14 +54,20 @@ class Leaderboard(commands.Cog):
             )
             embed.set_image(url="attachment://leaderboard.png")
             
-            await interaction.followup.send(embed=embed, file=file)
+            view = LeaderboardMainView(interaction.guild, top_users, 1, total_pages, self)
+            await interaction.followup.send(embed=embed, file=file, view=view)
             
         except Exception as e:
             logger.error(f"Error generating leaderboard: {e}")
             await interaction.followup.send(f"❌ Failed to generate leaderboard: {e}")
 
-    async def generate_leaderboard_card(self, guild: discord.Guild, top_users: list) -> discord.File:
+    async def generate_leaderboard_card(self, guild: discord.Guild, all_users: list, page: int = 1) -> discord.File:
         W, H = 1080, 1080
+        
+        total_pages = max(1, math.ceil(len(all_users) / 10))
+        page = max(1, min(page, total_pages))
+        start_idx = (page - 1) * 10
+        top_users = all_users[start_idx:start_idx + 10]
         
         # ── Background ────────────────────────────────────────────────────────
         canvas = make_gradient_bg(W, H)
@@ -78,13 +86,18 @@ class Leaderboard(commands.Cog):
         f_xp    = regular(24)
         
         # ── Title ─────────────────────────────────────────────────────────────
-        title_text = f"{guild.name.upper()} LEADERBOARD"
+        title_text = "LEADERBOARD"
         title_bb = draw.textbbox((0, 0), title_text, font=f_title)
         title_w = title_bb[2] - title_bb[0]
-        draw.text((W // 2 - title_w // 2, PY1 + 40), title_text, font=f_title, fill=TEXT_W)
+        draw.text((W // 2 - title_w // 2, PY1 + 30), title_text, font=f_title, fill=TEXT_W)
+        
+        server_text = f"{guild.name.upper()}"
+        server_bb = draw.textbbox((0, 0), server_text, font=f_sub)
+        server_w = server_bb[2] - server_bb[0]
+        draw.text((W // 2 - server_w // 2, PY1 + 90), server_text, font=f_sub, fill=TEXT_M)
         
         draw.line(
-            [(W // 2 - 300, PY1 + 120), (W // 2 + 300, PY1 + 120)],
+            [(W // 2 - 300, PY1 + 140), (W // 2 + 300, PY1 + 140)],
             fill=(*GOLD, 160), width=3
         )
         
@@ -100,7 +113,7 @@ class Leaderboard(commands.Cog):
         if len(top_3) >= 3:
             positions.append((3, top_3[2], W // 2 + 300, 160)) # Rank 3 (Right)
             
-        y_top3 = PY1 + 180
+        y_top3 = PY1 + 190
         
         for rank, user_data, x_center, avatar_size in positions:
             user_id = user_data["user_id"]
@@ -154,8 +167,10 @@ class Leaderboard(commands.Cog):
             name_w = name_bb[2] - name_bb[0]
             draw.text((x_center - name_w // 2, badge_y + 24), display_name, font=f_name, fill=TEXT_W)
             
-            # XP
-            xp_str = f"{xp:,} XP"
+            # Time Format (HH:MM)
+            hours = xp // 60
+            minutes = xp % 60
+            xp_str = f"{hours:02d}:{minutes:02d}"
             xp_bb = draw.textbbox((0,0), xp_str, font=f_xp)
             xp_w = xp_bb[2] - xp_bb[0]
             
@@ -200,8 +215,10 @@ class Leaderboard(commands.Cog):
                 # Name
                 draw.text((start_x + 100, row_y + 14), display_name, font=f_name, fill=TEXT_W)
                 
-                # XP Badge on the right
-                xp_str = f"{xp:,} XP"
+                # Time Badge on the right
+                hours = xp // 60
+                minutes = xp % 60
+                xp_str = f"{hours:02d}:{minutes:02d}"
                 xp_bb = draw.textbbox((0,0), xp_str, font=f_xp)
                 xp_w = xp_bb[2] - xp_bb[0]
                 
@@ -223,6 +240,43 @@ class Leaderboard(commands.Cog):
         canvas.save(fp, format="PNG")
         fp.seek(0)
         return discord.File(fp, filename="leaderboard.png")
+
+class LeaderboardMainView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, all_users: list, current_page: int, total_pages: int, cog):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.all_users = all_users
+        self.current_page = current_page
+        self.total_pages = total_pages
+        self.cog = cog
+        
+        self.prev_btn.disabled = self.current_page <= 1
+        self.next_btn.disabled = self.current_page >= self.total_pages
+
+    async def update_message(self, interaction: discord.Interaction):
+        self.prev_btn.disabled = self.current_page <= 1
+        self.next_btn.disabled = self.current_page >= self.total_pages
+        
+        file = await self.cog.generate_leaderboard_card(self.guild, self.all_users, self.current_page)
+        
+        embed = discord.Embed(
+            title=f"🏆 {self.guild.name} Leaderboard",
+            description=f"Top members by study XP (Page {self.current_page}/{self.total_pages})",
+            color=discord.Color.gold()
+        )
+        embed.set_image(url="attachment://leaderboard.png")
+        
+        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+
+    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        await self.update_message(interaction)
+
+    @discord.ui.button(label="▶️ Next", style=discord.ButtonStyle.secondary, custom_id="lb_next")
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        await self.update_message(interaction)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Leaderboard(bot))
