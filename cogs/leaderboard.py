@@ -47,15 +47,9 @@ class Leaderboard(commands.Cog):
             
             file = await self.generate_leaderboard_card(interaction.guild, top_users, 1)
             
-            embed = discord.Embed(
-                title=f"🏆 {interaction.guild.name} Leaderboard",
-                description="Top members by study XP",
-                color=discord.Color.gold()
-            )
-            embed.set_image(url="attachment://leaderboard.png")
-            
+            content = f"🏆 **{interaction.guild.name} Leaderboard** - Top members by study XP"
             view = LeaderboardMainView(interaction.guild, top_users, 1, total_pages, self)
-            await interaction.followup.send(embed=embed, file=file, view=view)
+            await interaction.followup.send(content=content, file=file, view=view)
             
         except Exception as e:
             logger.error(f"Error generating leaderboard: {e}")
@@ -259,14 +253,9 @@ class LeaderboardMainView(discord.ui.View):
         
         file = await self.cog.generate_leaderboard_card(self.guild, self.all_users, self.current_page)
         
-        embed = discord.Embed(
-            title=f"🏆 {self.guild.name} Leaderboard",
-            description=f"Top members by study XP (Page {self.current_page}/{self.total_pages})",
-            color=discord.Color.gold()
-        )
-        embed.set_image(url="attachment://leaderboard.png")
+        content = f"🏆 **{self.guild.name} Leaderboard** - Top members by study XP (Page {self.current_page}/{self.total_pages})"
         
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        await interaction.response.edit_message(content=content, attachments=[file], view=self, embed=None)
 
     @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
