@@ -314,8 +314,18 @@ class PomodoroSession:
                                 f"🔔 **{self.name}** — Focus done! "
                                 f"Enjoy your **{self.break_length // 60}m** break. 🟢{mention_part}"
                             )
-                        except Exception:
-                            pass
+                            # Award XP for focus time
+                            xp_earned = self.focus_length // 60
+                            guild_id = self.voice_channel.guild.id
+                            for member in self.voice_channel.members:
+                                if not member.bot:
+                                    database.add_user_xp(guild_id, member.id, xp_earned)
+                            await self.notification_channel.send(
+                                f"✨ Everyone in the study group just earned **{xp_earned} XP**!"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error rewarding XP or sending notification: {e}")
+                            
                         if self.voice_alert:
                             await self.play_voice_alert("Times up, streach and rehydrate see in a few")
                     else:
