@@ -39,6 +39,8 @@ class WelcomeBot(commands.Bot):
         await self.load_extension("cogs.todo")
         logger.info("Loading Economy Cog...")
         await self.load_extension("cogs.economy")
+        logger.info("Loading Profile Cog...")
+        await self.load_extension("cogs.profile")
 
     async def on_ready(self):
         logger.info(f"Bot logged in as {self.user.name}#{self.user.discriminator} (ID: {self.user.id})")
